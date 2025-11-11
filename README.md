@@ -1,9 +1,9 @@
 # Teaching Pretrained Language Models to Think Deeper with Retrofitted Recurrence
 
-A joint project by: Sean McLeish, Ang Li, John Kirchenbauer, Dayal Singh Kalra, Brian R. Bartoldson, Bhavya Kailkhura, Avi Schwarzschild, Jonas Geiping, Micah Goldblum, Tom Goldstein
+A joint project by: Sean McLeish, Ang Li, John Kirchenbauer, Dayal Singh Kalra, Brian R. Bartoldson, Bhavya Kailkhura, Avi Schwarzschild, Jonas Geiping, Tom Goldstein, Micah Goldblum
 
 <p align="center">
-<a target="_blank" href="https://arxiv.org/abs/">
+<a target="_blank" href="https://arxiv.org/abs/2511.07384">
 <img style="height:22pt" src="https://img.shields.io/badge/-Paper-B31B1B?style=flat&logo=arxiv">
 <a target="_blank" href="https://hf.co/collections/tomg-group-umd/retrofitting-recurrence">
 <img style="height:22pt" src="https://img.shields.io/badge/-🤗%20Models-red?style=flat"></a>
@@ -16,8 +16,8 @@ To cite our work, please use this bibtex.
 ```
 @article{mcleish2025teaching,
     title={Teaching Pretrained Language Models to Think Deeper with Retrofitted Recurrence}, 
-    author={Sean McLeish and Ang Li and John Kirchenbauer and Dayal Singh Kalra and Brian R. Bartoldson and Bhavya Kailkhura and Avi Schwarzschild and Jonas Geiping and Micah Goldblum and Tom Goldstein},
-    journal={arXiv preprint arXiv:},
+    author={Sean McLeish and Ang Li and John Kirchenbauer and Dayal Singh Kalra and Brian R. Bartoldson and Bhavya Kailkhura and Avi Schwarzschild and Jonas Geiping and Tom Goldstein and Micah Goldblum},
+    journal={arXiv preprint arXiv:2511.07384},
     year={2025}
 }
 ```
