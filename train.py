@@ -7,24 +7,26 @@
 import time
 
 global_start_time = time.monotonic()
-import os
-import socket
-from typing import Any, Optional
-from functools import partial
-import sys
 import datetime
+import math
+import os
 import shutil
+import socket
 import subprocess
+import sys
+from contextlib import nullcontext
+from dataclasses import dataclass, field
+from functools import partial
+from typing import Any
+
 import torch
 import wandb
-import math
-from transformers import AutoModelForCausalLM, AutoTokenizer, get_scheduler, AutoConfig
-from datasets import load_dataset, Dataset, load_from_disk
-from contextlib import nullcontext
-from stateful_parquet_dataset import get_parquet_dataloader
-from dataclasses import dataclass, field
+from datasets import Dataset, load_dataset, load_from_disk
 from jsonargparse import CLI
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, get_scheduler
+
 from ellisadam import ELLISAdam
+from stateful_parquet_dataset import get_parquet_dataloader
 
 torch.backends.cuda.enable_flash_sdp(True)
 torch.backends.cuda.enable_math_sdp(True)
@@ -45,17 +47,15 @@ if int(os.getenv("SLURM_PROCID", "0")) == 0:
 class CLISettings:
     run_name: str = "default-run"
     out_path: str = "huginn_llama"
-    resume_path: Optional[str] = None
-    save_n_mins_before_timeout: Optional[int] = None
+    resume_path: str | None = None
+    save_n_mins_before_timeout: int | None = None
     # data
-    preprocessed_data_path: Optional[str] = None
+    preprocessed_data_path: str | None = None
     dataset_location: str = "openai/gsm8k"
-    dataset_args: dict[str, Any] = field(
-        default_factory=lambda: dict(q_col="question", a_col="answer")
-    )
+    dataset_args: dict[str, Any] = field(default_factory=lambda: dict(q_col="question", a_col="answer"))
     dataset_config: str = "main"
-    max_length: Optional[int] = None
-    max_samples: Optional[int] = None
+    max_length: int | None = None
+    max_samples: int | None = None
     # impl
     micro_batch_size: int = 2
     compile: bool = False
@@ -63,26 +63,24 @@ class CLISettings:
     max_steps: int = 0
     epochs: int = 1
     batch_size: int = 32
-    optim_config: dict[str, Any] = field(
-        default_factory=lambda: dict(lr=5e-7, weight_decay=1e-4, betas=(0.9, 0.95), eps=1e-8)
-    )
+    optim_config: dict[str, Any] = field(default_factory=lambda: dict(lr=5e-7, weight_decay=1e-4, betas=(0.9, 0.95), eps=1e-8))
     scheduler_args: dict[float, Any] = field(
         default_factory=lambda: dict(warmup=0.1, cooldown=0.1, min_lr_ratio=0.001)
-    ) # min_lr = min_lr_ratio * lr
+    )  # min_lr = min_lr_ratio * lr
     save_interval: int = -1
     model_name: str = "smcleish/Recurrent-TinyLlama-3T-untrained"
     wandb_disabled: bool = False
     seed: int = 74
     fix_num_steps: bool = False
     init_from_scratch: bool = False
-    take_loss_over_all_tokens: bool = False # for chat templated datasets default is to only supervise assistant tokens
+    take_loss_over_all_tokens: bool = False  # for chat templated datasets default is to only supervise assistant tokens
     max_grad_norm: float = 1.0
     bf16_true: bool = False
     compile_warmup_routine: bool = False
     no_amp: bool = True
     is_parquet_dataset: bool = False
     ignore_past_parquet_dataset: bool = False
-    parquet_dataset_max_tokens: Optional[int] = None
+    parquet_dataset_max_tokens: int | None = None
     ignore_past_scheduler: bool = False
     mean_recurrence_schedule: dict[float, Any] = field(
         default_factory=lambda: dict(turn_on=False, warmup=0.1, max_mean_rec=32, warmup_type="linear")
@@ -93,11 +91,17 @@ class CLISettings:
     no_monkeypatch_on_jonas_init: bool = False
     throttle: bool = False
     non_recurrent_model: bool = False
-    muon: dict[float, Any] = field(
-        default_factory=lambda: dict(use_muon=False, lr=0.005, weight_decay=1e-4)
-    )
+    muon: dict[float, Any] = field(default_factory=lambda: dict(use_muon=False, lr=0.005, weight_decay=1e-4))
     use_ellis_adam: dict[float, Any] = field(
-        default_factory=lambda: dict(use_ellis_adam=False, decouple_wd=True, tensor_wise_gradient_normalization=False, tensor_wise_finite_check=False, running_init=True, atan_adam=True, update_clipping=True,)
+        default_factory=lambda: dict(
+            use_ellis_adam=False,
+            decouple_wd=True,
+            tensor_wise_gradient_normalization=False,
+            tensor_wise_finite_check=False,
+            running_init=True,
+            atan_adam=True,
+            update_clipping=True,
+        )
     )
     parquet_epoching_flag_use_with_real_caution: int = 1
 
@@ -113,37 +117,42 @@ class CLISettings:
         else:
             # i.e. we haven't turned amp off
             self.amp_args["enabled"] = True
-            self.amp_args["cache_enabled"] = self.compile and (not self.bf16_true) # can only use cache if compiled and in float32
+            self.amp_args["cache_enabled"] = self.compile and (
+                not self.bf16_true
+            )  # can only use cache if compiled and in float32
 
         assert self.batch_size % self.micro_batch_size == 0, "grad accum steps must be an int"
         if self.is_parquet_dataset:
-            assert (self.parquet_dataset_max_tokens is not None) or (self.max_steps != 0), "if using parquet need to specify max tokens or max steps"
+            assert (self.parquet_dataset_max_tokens is not None) or (self.max_steps != 0), (
+                "if using parquet need to specify max tokens or max steps"
+            )
             assert self.max_length is not None, "if using parquet need to specify max_length of context"
 
         if self.non_recurrent_model:
             assert not self.throttle, "Can't use throttle with non_recurrent_model"
-            assert not self.mean_backprop_depth_schedule["turn_on"], "Can't use mean_backprop_depth_schedule with non_recurrent_model"
+            assert not self.mean_backprop_depth_schedule["turn_on"], (
+                "Can't use mean_backprop_depth_schedule with non_recurrent_model"
+            )
             assert not self.mean_recurrence_schedule["turn_on"], "Can't use mean_recurrence_schedule with non_recurrent_model"
             assert not self.compile_warmup_routine, "Can't use compile_warmup_routine with non_recurrent_model"
 
-            self.no_monkeypatch_on_jonas_init = True # turn off for normal models
+            self.no_monkeypatch_on_jonas_init = True  # turn off for normal models
+
 
 @dataclass
 class Message:
     role: str
     content: str
 
+
 def get_flux_timeleft():
-    result = subprocess.run(
-        ["flux", "job", "timeleft"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=True,
-        text=True
-    )
+    result = subprocess.run(["flux", "job", "timeleft"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, text=True)
     return int(result.stdout.strip())
 
+
 has_completed_timeout_save = False
+
+
 def check_if_save(save_n_mins_before_timeout):
     global has_completed_timeout_save
     if (save_n_mins_before_timeout * 60 > get_flux_timeleft()) and (not has_completed_timeout_save):
@@ -151,10 +160,12 @@ def check_if_save(save_n_mins_before_timeout):
         return True
     return False
 
+
 def save_model_only(cfg, state, chkpt_name):
     unwrapped_model = get_unwrapped_model(state)
     unwrapped_model.save_pretrained(f"{cfg.out_path}/{cfg.run_name}/{chkpt_name}")
     state["tokenizer"].save_pretrained(f"{cfg.out_path}/{cfg.run_name}/{chkpt_name}")
+
 
 def save_checkpoint(state, agg_vars_dict, cfg):
     # agg_vars_dict = {"data_start_step": data_start_step, "optimizer_step": optimizer_step, "total_tokens": total_tokens, "total_tokens_with_loss": total_tokens_with_loss}
@@ -164,7 +175,7 @@ def save_checkpoint(state, agg_vars_dict, cfg):
         dataloader_state = state["dataloader"].state_dict()
     else:
         dataloader_state = None
-    
+
     if cfg.muon["use_muon"]:
         # muon does an all gather on saving
         optim_state_dict = state["optimizer"].state_dict()
@@ -189,7 +200,7 @@ def save_checkpoint(state, agg_vars_dict, cfg):
         rng_state=torch.get_rng_state(),
         cuda_rng_state=torch.cuda.get_rng_state_all(),
         agg_vars_dict=agg_vars_dict,
-        cfg=cfg.__dict__, # for provenance
+        cfg=cfg.__dict__,  # for provenance
         **extras,
     )
 
@@ -197,6 +208,7 @@ def save_checkpoint(state, agg_vars_dict, cfg):
     os.makedirs(chkpt_dir, exist_ok=True)
     torch.save(ckpt, f"{chkpt_dir}/chkpt.pt")
     print(f"[rank 0] Saved checkpoint @ step {step:,}")
+
 
 def load_checkpoint(state, cfg, device):
     ckpt = torch.load(f"{cfg.resume_path}/chkpt.pt", map_location=device)
@@ -219,19 +231,24 @@ def load_checkpoint(state, cfg, device):
     print(f"Resumed from {cfg.resume_path}")
     return ckpt["agg_vars_dict"]
 
+
 def is_main_process():
     if torch.distributed.is_initialized():
         return torch.distributed.get_rank() == 0
     else:
         return True
 
+
 def seed_everything(seed):
     import random
+
     import numpy as np
+
     random.seed(seed)
     np.random.seed(seed)
-    torch.cuda.manual_seed_all(seed) 
+    torch.cuda.manual_seed_all(seed)
     torch.manual_seed(seed)
+
 
 def get_unwrapped_model(state):
     if isinstance(state, dict):
@@ -246,7 +263,10 @@ def get_unwrapped_model(state):
 # DEFAULT_SYS_PROMPT = "You are a helpful assistant that can help users with mathematical reasoning."
 DEFAULT_SYS_PROMPT = "You are a helpful assistant that can assist users with mathematical reasoning."
 
-def initialize_state_monkeypatch(self, input_embeds, scale: float = 1.0, patched_std: float = 0.008703882797784892, patched_embed_scale: float = 1.0):
+
+def initialize_state_monkeypatch(
+    self, input_embeds, scale: float = 1.0, patched_std: float = 0.008703882797784892, patched_embed_scale: float = 1.0
+):
     """
     Patch to fixes the std to the Huginn value and remove the embed scaling
     """
@@ -274,7 +294,9 @@ def startup(cfg: CLISettings):
             rank=rank,
             world_size=int(os.getenv("SLURM_NTASKS", os.getenv("WORLD_SIZE", -1))),
             device_id=local_device,  # this immediately forms the NCCL communicator, crucial based on Sean's testing
-            timeout=datetime.timedelta(hours=0.5 if cfg.is_parquet_dataset else 2), # 2hrs should be good to process for ~20M samples-ish
+            timeout=datetime.timedelta(
+                hours=0.5 if cfg.is_parquet_dataset else 2
+            ),  # 2hrs should be good to process for ~20M samples-ish
         )
         world_size = torch.distributed.get_world_size()
         print(f"Comms formed on rank {rank} with device {local_device} out of world size {world_size}.")
@@ -304,6 +326,7 @@ def startup(cfg: CLISettings):
         )
         if not cfg.no_monkeypatch_on_jonas_init:
             from types import MethodType
+
             model.initialize_state = MethodType(initialize_state_monkeypatch, model)
 
         model.to(device=local_device, dtype=weight_dtype)
@@ -324,7 +347,9 @@ def startup(cfg: CLISettings):
 
     ##########  Distribute model   ##############
     if distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_device], find_unused_parameters=not cfg.compile, gradient_as_bucket_view=True)
+        model = torch.nn.parallel.DistributedDataParallel(
+            model, device_ids=[local_device], find_unused_parameters=not cfg.compile, gradient_as_bucket_view=True
+        )
     if cfg.compile:
         model = torch.compile(model, fullgraph=False, dynamic=False, mode="max-autotune-no-cudagraphs")
     ##########     Optimizer       ##############
@@ -343,14 +368,18 @@ def startup(cfg: CLISettings):
         norms = []
 
         if cfg.non_recurrent_model:
-            if ("TinyLlama-1.1B-intermediate-step-1431k-3T" in cfg.model_name) or ("Llama-3.2-1B" in cfg.model_name) or ("OLMo-2" in cfg.model_name):
+            if (
+                ("TinyLlama-1.1B-intermediate-step-1431k-3T" in cfg.model_name)
+                or ("Llama-3.2-1B" in cfg.model_name)
+                or ("OLMo-2" in cfg.model_name)
+            ):
                 for n, p in model.named_parameters():
                     if ("norm" in n) or ("bias" in n):
                         norms.append(p)
                     elif ("embed_tokens" in n) or ("lm_head" in n):
                         non_body_params.append(p)
                     else:
-                        body_params.append((n,p))
+                        body_params.append((n, p))
             else:
                 for n, p in model.named_parameters():
                     if ("norm" in n) or ("bias" in n):
@@ -361,11 +390,11 @@ def startup(cfg: CLISettings):
                         body_params.append(n)
                 if is_main_process():
                     print(model)
-                    print("="*70)
+                    print("=" * 70)
                     print(norms)
-                    print("="*70)
+                    print("=" * 70)
                     print(non_body_params)
-                    print("="*70)
+                    print("=" * 70)
                     print(body_params)
                 assert False, "Model not allowed for muon"
         else:
@@ -376,15 +405,27 @@ def startup(cfg: CLISettings):
                 elif ("wte" in n) or ("lm_head" in n):
                     non_body_params.append(p)
                 else:
-                    body_params.append((n,p))
+                    body_params.append((n, p))
 
         # body_params = sorted(body_params, key=lambda x: x.size(), reverse=True)
         # Took sorting out of the init so that it is deterministic
         body_params.sort(key=lambda np: (-np[1].numel(), tuple(np[1].shape), np[0]))
         body_params = [p for _, p in body_params]
         param_groups = [
-            dict(params=body_params, use_muon=True, lr=cfg.muon["lr"], weight_decay=cfg.muon["weight_decay"], no_sorting_in_init=False),
-            dict(params=non_body_params + norms, use_muon=False, lr=cfg.optim_config["lr"], betas=cfg.optim_config["betas"], weight_decay=cfg.optim_config["weight_decay"]),
+            dict(
+                params=body_params,
+                use_muon=True,
+                lr=cfg.muon["lr"],
+                weight_decay=cfg.muon["weight_decay"],
+                no_sorting_in_init=False,
+            ),
+            dict(
+                params=non_body_params + norms,
+                use_muon=False,
+                lr=cfg.optim_config["lr"],
+                betas=cfg.optim_config["betas"],
+                weight_decay=cfg.optim_config["weight_decay"],
+            ),
         ]
         optimizer = MuonWithAuxAdam(param_groups)
 
@@ -422,7 +463,7 @@ def startup(cfg: CLISettings):
                 else:
                     non_recur_params.append(p)
             params = [
-                {"params": recur_params,  "lr": cfg.optim_config["lr"]},
+                {"params": recur_params, "lr": cfg.optim_config["lr"]},
                 {"params": non_recur_params, "lr": cfg.optim_config["lr"]},
             ]
             optim_config = cfg.optim_config.copy()
@@ -445,7 +486,7 @@ def startup(cfg: CLISettings):
             else:
                 messages = tokenizer.bos_token + examples[cfg.dataset_args["q_col"]][idx].strip()
             conversations.append(messages)
-        
+
         if cfg.dataset_args["q_col"] != "text":
             chat_encoding = tokenizer.apply_chat_template(
                 conversations,
@@ -467,7 +508,6 @@ def startup(cfg: CLISettings):
                 max_length=cfg.max_length + 1,
                 return_tensors="pt",
                 truncation=True,
-                
             )
             chat_encoding["assistant_masks"] = chat_encoding["attention_mask"].clone()
 
@@ -480,7 +520,7 @@ def startup(cfg: CLISettings):
     if cfg.preprocessed_data_path is None:
         cfg.token_id_col_name = "token_ids"
         dataset_save_dir = f"{cfg.out_path}/{cfg.run_name}/dataset"
-        if is_main_process(): # only load to rank 0 to begin
+        if is_main_process():  # only load to rank 0 to begin
             try:
                 dataset: Dataset = load_dataset(cfg.dataset_location, cfg.dataset_config)["train"]  # type: ignore
             except:
@@ -489,7 +529,7 @@ def startup(cfg: CLISettings):
             if cfg.max_samples is not None:
                 dataset = dataset.select(range(cfg.max_samples))
 
-            if os.path.exists(dataset_save_dir): # delete any old dataset
+            if os.path.exists(dataset_save_dir):  # delete any old dataset
                 shutil.rmtree(dataset_save_dir)
 
             tokenized_dataset = dataset.map(
@@ -500,7 +540,7 @@ def startup(cfg: CLISettings):
                 batch_size=1024,
             )
 
-        if distributed: # load the dataset to other ranks
+        if distributed:  # load the dataset to other ranks
             if is_main_process():
                 tokenized_dataset.save_to_disk(dataset_save_dir)
             torch.distributed.barrier()
@@ -510,7 +550,13 @@ def startup(cfg: CLISettings):
         cfg.token_id_col_name = "input_ids"
         if cfg.is_parquet_dataset:
             assert cfg.max_samples is None, "cannot have max samples for parquet dataset"
-            tokenized_dataset = get_parquet_dataloader(world_size, rank, cfg.micro_batch_size, cfg.preprocessed_data_path, num_epochs=cfg.parquet_epoching_flag_use_with_real_caution)
+            tokenized_dataset = get_parquet_dataloader(
+                world_size,
+                rank,
+                cfg.micro_batch_size,
+                cfg.preprocessed_data_path,
+                num_epochs=cfg.parquet_epoching_flag_use_with_real_caution,
+            )
         else:
             tokenized_dataset = load_from_disk(cfg.preprocessed_data_path)
             if cfg.max_samples is not None:
@@ -570,7 +616,7 @@ def startup(cfg: CLISettings):
         optimizer=optimizer,
         num_warmup_steps=num_warmup_steps,
         num_training_steps=max_training_steps,
-        scheduler_specific_kwargs={"num_decay_steps":num_decay_steps, "min_lr_ratio": cfg.scheduler_args["min_lr_ratio"]},
+        scheduler_specific_kwargs={"num_decay_steps": num_decay_steps, "min_lr_ratio": cfg.scheduler_args["min_lr_ratio"]},
     )
 
     state = {
@@ -583,23 +629,31 @@ def startup(cfg: CLISettings):
     }
 
     if cfg.mean_recurrence_schedule["turn_on"]:
-        # make a dummy optimizer of one param 
+        # make a dummy optimizer of one param
         num_warmup_steps = math.ceil(cfg.mean_recurrence_schedule["warmup"] * max_training_steps)
         mean_recurrence_scheduler = get_scheduler(
             name="warmup_stable_decay",
-            optimizer=torch.optim.SGD([torch.nn.Parameter(torch.zeros(1))], lr=float(cfg.mean_recurrence_schedule["max_mean_rec"])),
+            optimizer=torch.optim.SGD(
+                [torch.nn.Parameter(torch.zeros(1))], lr=float(cfg.mean_recurrence_schedule["max_mean_rec"])
+            ),
             num_warmup_steps=num_warmup_steps,
             num_training_steps=max_training_steps,
-            scheduler_specific_kwargs={"num_decay_steps":0, "min_lr_ratio":0, "warmup_type": cfg.mean_recurrence_schedule["warmup_type"]},
+            scheduler_specific_kwargs={
+                "num_decay_steps": 0,
+                "min_lr_ratio": 0,
+                "warmup_type": cfg.mean_recurrence_schedule["warmup_type"],
+            },
         )
         state["mean_recurrence_scheduler"] = mean_recurrence_scheduler
-    
+
     if cfg.mean_backprop_depth_schedule["turn_on"]:
-        # make a dummy optimizer of one param 
+        # make a dummy optimizer of one param
         num_warmup_steps = math.ceil(cfg.mean_backprop_depth_schedule["warmup"] * max_training_steps)
 
         max_depth = cfg.mean_backprop_depth_schedule["max_backprop"]
-        start = max(1.0, cfg.mean_backprop_depth_schedule["start"] - 1) # start at one below so we get the right value out of the scheduler after the first step
+        start = max(
+            1.0, cfg.mean_backprop_depth_schedule["start"] - 1
+        )  # start at one below so we get the right value out of the scheduler after the first step
         min_lr_ratio = max(0.0, min(1.0, start / max_depth))
 
         mean_backprop_depth_scheduler = get_scheduler(
@@ -607,10 +661,10 @@ def startup(cfg: CLISettings):
             optimizer=torch.optim.SGD([torch.nn.Parameter(torch.zeros(1))], lr=float(max_depth)),
             num_warmup_steps=num_warmup_steps,
             num_training_steps=max_training_steps,
-            scheduler_specific_kwargs={"num_decay_steps":0, "min_lr_ratio":min_lr_ratio},
+            scheduler_specific_kwargs={"num_decay_steps": 0, "min_lr_ratio": min_lr_ratio},
         )
         state["mean_backprop_depth_scheduler"] = mean_backprop_depth_scheduler
-        state["mean_backprop_depth_scheduler"].step() # take the first step so we get 2 out of the scheduler and not 1
+        state["mean_backprop_depth_scheduler"].step()  # take the first step so we get 2 out of the scheduler and not 1
 
     cfg.world_size = world_size
     if is_main_process():
@@ -639,7 +693,6 @@ def distributed_and_agg_metrics(metrics_to_agg_data_step, metrics_to_agg_optim_s
             torch.distributed.all_reduce(tensor, op=op)
             return tensor.item()
         return value
-    
 
     aggregated = {}
     # metrics_to_agg_data_step
@@ -660,20 +713,22 @@ def distributed_and_agg_metrics(metrics_to_agg_data_step, metrics_to_agg_optim_s
     # metrics_to_agg_optim_step
     for key, val in metrics_to_agg_optim_step.items():
         if key in keys_to_mean:
-            # we don't pass this anymore as it is global anyway but is example of how to use avg
+            # we don't pass this anymore as it is global anyway but is example of how to use avg
             aggregated[key] = _sync(val, op=torch.distributed.ReduceOp.AVG)
         else:
             aggregated[key] = _sync(val)
 
     return aggregated
 
+
 def get_steps_compiling(data_step, device):
     if data_step > 600:
         exit()
     n = data_step % 300
-    k =  min(8, n)
+    k = min(8, n)
     print(f"Warming up sampling step={data_step}, n={n}, k={k}")
-    return  torch.tensor([n,k], device=device)
+    return torch.tensor([n, k], device=device)
+
 
 def num_steps_sampler(data_step, mean_recurrence, mean_backprop_depth, cfg):
     """
@@ -682,9 +737,9 @@ def num_steps_sampler(data_step, mean_recurrence, mean_backprop_depth, cfg):
     """
     t = max(mean_recurrence - mean_backprop_depth, 0)
     s = mean_backprop_depth
-    
-    seed_n = 514229 + data_step 
-    seed_k = 317811 + data_step   
+
+    seed_n = 514229 + data_step
+    seed_k = 317811 + data_step
 
     n_generator = torch.Generator(device="cpu")
     n_generator.manual_seed(seed_n % (2**31 - 1))
@@ -699,6 +754,7 @@ def num_steps_sampler(data_step, mean_recurrence, mean_backprop_depth, cfg):
     k = torch.as_tensor(torch.minimum(torch.as_tensor(s), p))
 
     return n.to(dtype=torch.long), k.to(dtype=torch.long)
+
 
 def sheduler_n_k_handler(state, cfg, model_config):
     if cfg.mean_recurrence_schedule["turn_on"]:
@@ -717,11 +773,29 @@ def sheduler_n_k_handler(state, cfg, model_config):
 
     if (new_mean_rec - mean_backprop_depth) < 0:
         # t = max(mean_recurrence - mean_backprop_depth, 0) messes up the schedule so we catch that here
-        return partial(num_steps_sampler, mean_recurrence=new_mean_rec, mean_backprop_depth=new_mean_rec, cfg=cfg), new_mean_rec, new_mean_rec
+        return (
+            partial(num_steps_sampler, mean_recurrence=new_mean_rec, mean_backprop_depth=new_mean_rec, cfg=cfg),
+            new_mean_rec,
+            new_mean_rec,
+        )
     else:
-        return partial(num_steps_sampler, mean_recurrence=new_mean_rec, mean_backprop_depth=mean_backprop_depth, cfg=cfg), new_mean_rec, mean_backprop_depth
+        return (
+            partial(num_steps_sampler, mean_recurrence=new_mean_rec, mean_backprop_depth=mean_backprop_depth, cfg=cfg),
+            new_mean_rec,
+            mean_backprop_depth,
+        )
 
-def train(state, device, cfg, data_start_step=1, optimizer_step=0, total_tokens_from_restart=0, total_tokens_with_loss_from_restart=0, elapsed_time_from_restart=0.0):
+
+def train(
+    state,
+    device,
+    cfg,
+    data_start_step=1,
+    optimizer_step=0,
+    total_tokens_from_restart=0,
+    total_tokens_with_loss_from_restart=0,
+    elapsed_time_from_restart=0.0,
+):
     model, optimizer = state["model"], state["optimizer"]
     model.train()
 
@@ -731,7 +805,7 @@ def train(state, device, cfg, data_start_step=1, optimizer_step=0, total_tokens_
     total_tokens = 0
     total_tokens_with_loss = 0
     tokens_in_step = 0
-    k_mean_tracker = [0,0]
+    k_mean_tracker = [0, 0]
     elapsed_time = 0.0
 
     output_details = {
@@ -755,7 +829,9 @@ def train(state, device, cfg, data_start_step=1, optimizer_step=0, total_tokens_
     else:
         new_mean_rec = model_config.mean_recurrence
         new_backprop_depth = model_config.mean_backprop_depth
-        num_steps_sampler_partial = partial(num_steps_sampler, mean_recurrence=new_mean_rec, mean_backprop_depth=new_backprop_depth, cfg=cfg)
+        num_steps_sampler_partial = partial(
+            num_steps_sampler, mean_recurrence=new_mean_rec, mean_backprop_depth=new_backprop_depth, cfg=cfg
+        )
 
     for epoch in range(cfg.epochs):
         for data_step, inputs in enumerate(state["dataloader"], start=(data_start_step + 1) if cfg.is_parquet_dataset else 1):
@@ -777,10 +853,10 @@ def train(state, device, cfg, data_start_step=1, optimizer_step=0, total_tokens_
             total_tokens_with_loss += (labels != -100).sum().item()
 
             tokens_in_step += input_ids.numel()
-            is_accumulating = (data_step % accumulation_steps != 0)
- 
+            is_accumulating = data_step % accumulation_steps != 0
+
             if cfg.fix_num_steps:
-                num_steps = torch.tensor([0,1], device=model.device)
+                num_steps = torch.tensor([0, 1], device=model.device)
             elif cfg.compile_warmup_routine:
                 num_steps = get_steps_compiling(data_step, model.device)
             elif not cfg.non_recurrent_model:
@@ -797,8 +873,13 @@ def train(state, device, cfg, data_start_step=1, optimizer_step=0, total_tokens_
                         outputs = model(input_ids, labels=labels, num_steps=num_steps, output_details=output_details)
 
                     (outputs["loss"] / accumulation_steps).backward()
-                    return outputs["loss"].detach(), outputs["log_ppl"].detach(), outputs["stats"]["num_steps_no_grad"], outputs["stats"]["num_steps_with_grad"]
-            
+                    return (
+                        outputs["loss"].detach(),
+                        outputs["log_ppl"].detach(),
+                        outputs["stats"]["num_steps_no_grad"],
+                        outputs["stats"]["num_steps_with_grad"],
+                    )
+
             def non_rec_fwd_bwd(model, input_ids, labels):
                 with model.no_sync() if is_accumulating and state["distributed"] else nullcontext():
                     with torch.autocast(**cfg.amp_args):
@@ -806,7 +887,7 @@ def train(state, device, cfg, data_start_step=1, optimizer_step=0, total_tokens_
 
                     loss = torch.nn.functional.cross_entropy(
                         logits.view(-1, logits.shape[-1]), labels.view(-1), ignore_index=-100
-                    ) # copied from Huginn code to be sure
+                    )  # copied from Huginn code to be sure
 
                     (loss / accumulation_steps).backward()
                     log_ppl = loss.clone().detach().exp()
@@ -824,17 +905,16 @@ def train(state, device, cfg, data_start_step=1, optimizer_step=0, total_tokens_
                     # NOTE: this is only okay to do as k is the same at each step on all ranks
                     # this will break if k is not the same on all ranks at all steps
 
-                    g = optimizer.param_groups[0] # recur params first, then non recur when initing optim
-                    denom = max(1, int(k_mean_tracker[0] / k_mean_tracker[1])) # mean k for this batch
+                    g = optimizer.param_groups[0]  # recur params first, then non recur when initing optim
+                    denom = max(1, int(k_mean_tracker[0] / k_mean_tracker[1]))  # mean k for this batch
                     g["lr"] = g["lr"] / denom
-                    k_mean_tracker  = [0, 0]
+                    k_mean_tracker = [0, 0]
 
                     lrs = [pg["lr"] for pg in optimizer.param_groups]
-                    wandb_lr_log  = {"train/lr_recur": lrs[0], "train/lr_nonrecur": lrs[1]}
+                    wandb_lr_log = {"train/lr_recur": lrs[0], "train/lr_nonrecur": lrs[1]}
                 else:
                     lrs = [pg["lr"] for pg in optimizer.param_groups]
-                    wandb_lr_log  = {"train/lr_recur": lrs[0], "train/lr_nonrecur": lrs[0]}
-
+                    wandb_lr_log = {"train/lr_recur": lrs[0], "train/lr_nonrecur": lrs[0]}
 
                 total_norm = torch.nn.utils.clip_grad_norm_(
                     model.parameters(),
@@ -853,10 +933,12 @@ def train(state, device, cfg, data_start_step=1, optimizer_step=0, total_tokens_
                         state["mean_recurrence_scheduler"].step()
                     if cfg.mean_backprop_depth_schedule["turn_on"]:
                         state["mean_backprop_depth_scheduler"].step()
-                    num_steps_sampler_partial, new_mean_rec, new_backprop_depth = sheduler_n_k_handler(state, cfg, model_config)
+                    num_steps_sampler_partial, new_mean_rec, new_backprop_depth = sheduler_n_k_handler(
+                        state, cfg, model_config
+                    )
 
             if not is_accumulating:
-                time_taken = (time.monotonic() - step_time)
+                time_taken = time.monotonic() - step_time
                 time_interval = time_taken / accumulation_steps
                 tok_sec = tokens_in_step / time_taken
                 elapsed_time += time_taken
@@ -868,42 +950,72 @@ def train(state, device, cfg, data_start_step=1, optimizer_step=0, total_tokens_
                 step_time = time.monotonic()
                 tokens_in_step = 0
 
-                agg_metrics = distributed_and_agg_metrics(metrics_to_agg_data_step, {"total_tokens_with_loss": total_tokens_with_loss, "total_tokens": total_tokens, "tokens_per_second": tok_sec})
+                agg_metrics = distributed_and_agg_metrics(
+                    metrics_to_agg_data_step,
+                    {
+                        "total_tokens_with_loss": total_tokens_with_loss,
+                        "total_tokens": total_tokens,
+                        "tokens_per_second": tok_sec,
+                    },
+                )
                 total_tokens_to_log = total_tokens_from_restart + agg_metrics.pop("total_tokens")
                 total_tokens_with_loss_to_log = total_tokens_with_loss_from_restart + agg_metrics.pop("total_tokens_with_loss")
                 elapsed_time_to_log = elapsed_time_from_restart + elapsed_time
 
                 if is_main_process():
-                    wandb.log({
-                        "train/step": optimizer_step,
-                        "train/epoch": epoch,
-                        "train/lr": state["scheduler"].get_last_lr()[1 if cfg.throttle else 0],
-                        "train/total_tokens": total_tokens_to_log,
-                        "train/total_tokens_with_loss": total_tokens_with_loss_to_log,
-                        "train/total_tokens_no_loss": total_tokens_to_log - total_tokens_with_loss_to_log,
-                        "train/total_samples": data_step * cfg.micro_batch_size * world_size,
-                        "train/num_steps_no_grad": num_steps_no_grad,
-                        "train/num_steps_with_grad": num_steps_with_grad,
-                        "train/total_norm": total_norm,
-                        "train/grad_clip_coef": grad_clip_coef,
-                        "train/grad_clip_max_norm": cfg.max_grad_norm,
-                        "train/mean_recurrence": new_mean_rec,
-                        "train/mean_backprop_depth": new_backprop_depth,
-                        "train/elapsed_time": elapsed_time_to_log,
-                        **{f"train/{k}": v for k,v in agg_metrics.items()},
-                        **wandb_lr_log,
-                    }, step=optimizer_step)
+                    wandb.log(
+                        {
+                            "train/step": optimizer_step,
+                            "train/epoch": epoch,
+                            "train/lr": state["scheduler"].get_last_lr()[1 if cfg.throttle else 0],
+                            "train/total_tokens": total_tokens_to_log,
+                            "train/total_tokens_with_loss": total_tokens_with_loss_to_log,
+                            "train/total_tokens_no_loss": total_tokens_to_log - total_tokens_with_loss_to_log,
+                            "train/total_samples": data_step * cfg.micro_batch_size * world_size,
+                            "train/num_steps_no_grad": num_steps_no_grad,
+                            "train/num_steps_with_grad": num_steps_with_grad,
+                            "train/total_norm": total_norm,
+                            "train/grad_clip_coef": grad_clip_coef,
+                            "train/grad_clip_max_norm": cfg.max_grad_norm,
+                            "train/mean_recurrence": new_mean_rec,
+                            "train/mean_backprop_depth": new_backprop_depth,
+                            "train/elapsed_time": elapsed_time_to_log,
+                            **{f"train/{k}": v for k, v in agg_metrics.items()},
+                            **wandb_lr_log,
+                        },
+                        step=optimizer_step,
+                    )
 
                     if (cfg.save_interval != -1) and (optimizer_step % cfg.save_interval == 0):
                         save_model_only(cfg, state, f"model_only_chkpt_{optimizer_step}")
 
                 if (cfg.save_interval != -1) and (optimizer_step % (2 * cfg.save_interval) == 0):
                     # have to call save_checkpoint on all ranks for the dataloader
-                    save_checkpoint(state, {"data_start_step": data_step, "optimizer_step": optimizer_step, "total_tokens": total_tokens_to_log, "total_tokens_with_loss": total_tokens_with_loss_to_log, "elapsed_time": elapsed_time_to_log}, cfg)
+                    save_checkpoint(
+                        state,
+                        {
+                            "data_start_step": data_step,
+                            "optimizer_step": optimizer_step,
+                            "total_tokens": total_tokens_to_log,
+                            "total_tokens_with_loss": total_tokens_with_loss_to_log,
+                            "elapsed_time": elapsed_time_to_log,
+                        },
+                        cfg,
+                    )
 
                 if cfg.save_n_mins_before_timeout is not None:
                     if check_if_save(cfg.save_n_mins_before_timeout):
-                        save_checkpoint(state, {"data_start_step": data_step, "optimizer_step": optimizer_step, "total_tokens": total_tokens_to_log, "total_tokens_with_loss": total_tokens_with_loss_to_log, "elapsed_time": elapsed_time_to_log}, cfg)
+                        save_checkpoint(
+                            state,
+                            {
+                                "data_start_step": data_step,
+                                "optimizer_step": optimizer_step,
+                                "total_tokens": total_tokens_to_log,
+                                "total_tokens_with_loss": total_tokens_with_loss_to_log,
+                                "elapsed_time": elapsed_time_to_log,
+                            },
+                            cfg,
+                        )
                         if torch.distributed.is_initialized():
                             torch.distributed.barrier()
 
@@ -939,7 +1051,7 @@ def main():
     torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True  # Should be true anyway
     torch._dynamo.config.optimize_ddp = "python_reducer"
     # have to use the below two together as we do error if we compile the gradient states the no_grad/grad step
-    torch._dynamo.config.compiled_autograd = False # didn't work for Jonas ever...
+    torch._dynamo.config.compiled_autograd = False  # didn't work for Jonas ever...
     # torch._dynamo.config.error_on_recompile = True # Here's to hoping
 
     train_time = time.monotonic()
@@ -948,7 +1060,13 @@ def main():
     data_start_step, optimizer_step, total_tokens, total_tokens_with_loss, elapsed_time = 1, 0, 0, 0, 0.0
     if cfg.resume_path is not None:
         agg_dict = load_checkpoint(state, cfg, device)
-        data_start_step, optimizer_step, total_tokens, total_tokens_with_loss, elapsed_time = agg_dict["data_start_step"], agg_dict["optimizer_step"], agg_dict["total_tokens"], agg_dict["total_tokens_with_loss"], agg_dict["elapsed_time"]
+        data_start_step, optimizer_step, total_tokens, total_tokens_with_loss, elapsed_time = (
+            agg_dict["data_start_step"],
+            agg_dict["optimizer_step"],
+            agg_dict["total_tokens"],
+            agg_dict["total_tokens_with_loss"],
+            agg_dict["elapsed_time"],
+        )
         # cfg.max_steps = optimizer_step + cfg.max_steps # make max_steps max NEW steps
 
     # train

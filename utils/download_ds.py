@@ -1,13 +1,9 @@
-from datasets import load_dataset
 import argparse
 
+from datasets import load_dataset
+
 parser = argparse.ArgumentParser(description="Script that uses a dataset path.")
-parser.add_argument(
-    "--dataset_path",
-    type=str,
-    required=True,
-    help="Path to the dataset directory or file."
-)
+parser.add_argument("--dataset_path", type=str, required=True, help="Path to the dataset directory or file.")
 parser.parse_args()
 dataset_path = parser.dataset_path
 

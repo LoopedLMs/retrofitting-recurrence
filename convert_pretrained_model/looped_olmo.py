@@ -1,18 +1,19 @@
+
+import torch
+from torch import nn
+from transformers.cache_utils import Cache, DynamicCache
+from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
+from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.olmo2.modeling_olmo2 import (
-    Olmo2Model,
-    Olmo2ForCausalLM,
     Olmo2Config,
     Olmo2DecoderLayer,
+    Olmo2ForCausalLM,
+    Olmo2Model,
     Olmo2RMSNorm,
     Olmo2RotaryEmbedding,
 )
-from torch import nn
-import torch
-from typing import Callable, List, Optional, Tuple, Union
-from transformers.cache_utils import Cache, DynamicCache
-from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.processing_utils import Unpack
-from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
+
 
 class LoopConfig:
     num_rec = 2
@@ -31,9 +32,8 @@ class LoopConfig:
                     raise ValueError(f"Unknown config key: {key}")
 
     def __repr__(self):
-        return str(
-            {key: getattr(self, key) for key in vars(self) if not key.startswith("__")}
-        )
+        return str({key: getattr(self, key) for key in vars(self) if not key.startswith("__")})
+
 
 class LoopedOlmo2DecoderLayer(Olmo2DecoderLayer):
     def __init__(self, config: Olmo2Config, layer_idx: int):
@@ -47,6 +47,7 @@ class LoopedOlmo2DecoderLayer(Olmo2DecoderLayer):
         if cache_layer_idx is not None:
             self.self_attn.layer_idx = saved_cache_idx
         return out
+
 
 class LoopedOlmo2ForCausalLM(Olmo2ForCausalLM):
     def __init__(self, config):
@@ -69,6 +70,7 @@ class LoopedOlmo2ForCausalLM(Olmo2ForCausalLM):
 
     def get_latest_rep(self):
         return self.model.latest_rep
+
 
 class LoopedOlmo2Model(Olmo2Model):
     def __init__(self, config: Olmo2Config):
@@ -98,13 +100,11 @@ class LoopedOlmo2Model(Olmo2Model):
         self.loop_config = LoopConfig(args)
 
         i, j = self.loop_config.start_index, self.loop_config.block_size
-        prelude_ind, rec_layers_ind, coda_ind = self.get_split(
-            self.loop_config.num_rec, self.loop_config.remove_layers, i, j
-        )
+        prelude_ind, rec_layers_ind, coda_ind = self.get_split(self.loop_config.num_rec, self.loop_config.remove_layers, i, j)
         if self.loop_config.coda_size is not None:
-            coda_ind = coda_ind[:self.loop_config.coda_size]
+            coda_ind = coda_ind[: self.loop_config.coda_size]
         if self.loop_config.prelude_size is not None:
-            prelude_ind = prelude_ind[:self.loop_config.prelude_size]
+            prelude_ind = prelude_ind[: self.loop_config.prelude_size]
 
         print(f"regular model: {list(range(self.config.num_hidden_layers))}")
         print(f"prelude: {prelude_ind}")
@@ -118,35 +118,31 @@ class LoopedOlmo2Model(Olmo2Model):
 
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        use_cache: bool | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = None,
+        cache_position: torch.LongTensor | None = None,
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
     ) -> BaseModelOutputWithPast:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
+        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         use_cache = use_cache if use_cache is not None else self.config.use_cache
 
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
         if self.gradient_checkpointing and self.training and use_cache:
-            logger.warning_once(
-                "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`."
-            )
+            logger.warning_once("`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.")
             use_cache = False
 
         # TODO (joao): remove this exception in v4.56 -- it exists for users that try to pass a legacy cache
         # if not isinstance(past_key_values, (type(None), Cache)):
-            # raise ValueError("The `past_key_values` should be either a `Cache` object or `None`.")
+        # raise ValueError("The `past_key_values` should be either a `Cache` object or `None`.")
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)

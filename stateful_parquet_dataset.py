@@ -1,12 +1,14 @@
-from torch.utils.data import IterableDataset
+import hashlib
+import random
 from pathlib import Path
+
 import pyarrow.parquet as pq
 import torch
-import random
-import hashlib
+from natsort import natsorted
+from torch.utils.data import IterableDataset
 from torch.utils.data._utils.collate import collate_tensor_fn
 from torchdata.stateful_dataloader import StatefulDataLoader
-from natsort import natsorted
+
 
 class ParquetStreamPure(IterableDataset):
     # https://github.com/seal-rg/recurrent-pretraining/blob/59e0b69b2d96a59cbbe79c9d5034d89ecb5ab6f6/recpre/huggingface_dataset.py#L124
@@ -105,7 +107,10 @@ class ParquetStreamPure(IterableDataset):
                 self._state["row_group_idx"] += 1
 
             while self._state["buffer"]:
-                yield {"input_ids": torch.as_tensor(self._state["buffer"].pop(), dtype=torch.long), "attention_mask": torch.as_tensor(self._state["attn_mask_buffer"].pop(), dtype=torch.long),}
+                yield {
+                    "input_ids": torch.as_tensor(self._state["buffer"].pop(), dtype=torch.long),
+                    "attention_mask": torch.as_tensor(self._state["attn_mask_buffer"].pop(), dtype=torch.long),
+                }
 
     def _read_buffer(self, parquet_file):
         batch = parquet_file.read_row_group(self._state["row_group_idx"])
@@ -163,9 +168,7 @@ class ParquetStreamPure(IterableDataset):
             return state_dict[key][effective_rank]
 
         if int(get_value("fingerprint"), 16) != int(self._ds_fingerprint, 16):
-            print(
-                f"WARNING Dataset fingerprint mismatch. Expected {self._ds_fingerprint}, got {get_value('fingerprint')}"
-            )
+            print(f"WARNING Dataset fingerprint mismatch. Expected {self._ds_fingerprint}, got {get_value('fingerprint')}")
             self._state["file_idx"] = 0
             self._state["row_group_idx"] = 0
             row_idx = 0
@@ -196,6 +199,7 @@ class ParquetStreamPure(IterableDataset):
         self._state["attn_mask_buffer"] = self._state["attn_mask_buffer"][:row_idx]
         self._state["row_group_idx"] += 1
 
+
 def generic_collator(batch):
     to_return = {}
 
@@ -208,6 +212,7 @@ def generic_collator(batch):
         to_return[k] = collate_tensor_fn(this_set)
 
     return to_return
+
 
 def get_parquet_dataloader(world_size, global_rank, batch_size, path, testing=False, num_epochs=1):
     dataset = ParquetStreamPure(

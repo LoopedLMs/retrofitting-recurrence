@@ -9,10 +9,10 @@ def warmup_hist(this_checkpoint, warmup_duration, max_steps, max_rec, warmup_typ
         raise ValueError(f"Unsupported warmup_type: {warmup_type}")
 
     warmup_steps = int(warmup_duration * max_steps)
-    S = max(0, min(this_checkpoint, max_steps))          # steps completed so far (cap at max_steps)
+    S = max(0, min(this_checkpoint, max_steps))  # steps completed so far (cap at max_steps)
     S_warm = min(S, warmup_steps)
 
-    counts = {r: 0 for r in range(1, max_rec + 1)}
+    counts = dict.fromkeys(range(1, max_rec + 1), 0)
 
     # Add warmup contribution for each integer recurrence r
     for r in range(1, max_rec + 1):
@@ -25,11 +25,12 @@ def warmup_hist(this_checkpoint, warmup_duration, max_steps, max_rec, warmup_typ
         counts[r] += overlap
 
     # Add post-warmup contribution (stays at max_rec)
-    if S > warmup_steps:
+    if warmup_steps < S:
         counts[max_rec] += S - warmup_steps
 
     # prune zeros if you like:
     return {r: c for r, c in counts.items() if c > 0}
+
 
 def count_params(model):
     param_counts = {
@@ -73,13 +74,14 @@ def count_params(model):
 
     return param_counts
 
+
 def count_params_with_rec(param_counts, num_rec, num_grad_rec=8):
     ## FLOPs Calc
-    n = max(0, num_rec - num_grad_rec) # no grad
-    k = min(num_rec, num_grad_rec) # grad
+    n = max(0, num_rec - num_grad_rec)  # no grad
+    k = min(num_rec, num_grad_rec)  # grad
     prams_with_grad = param_counts["prelude"] + (param_counts["rec_block"] * k) + param_counts["coda"]
     prams_no_grad = param_counts["rec_block"] * n
-    param_counts["flops_times_by_6d"] = prams_with_grad + ((1/3) * prams_no_grad)
+    param_counts["flops_times_by_6d"] = prams_with_grad + ((1 / 3) * prams_no_grad)
     # 6 * D * N_1 + 2 * D * N_2 where N_1 = model params not including the recurrences with no grad and N_2 = model params from recurrences with no grad (i.e. N_1 + N_2 = effective params = N) so Flops = 2 * D  * (3* N_1 + N_2)
 
     param_counts["rec_block"] = param_counts["rec_block"] * num_rec

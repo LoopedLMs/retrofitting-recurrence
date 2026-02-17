@@ -1,25 +1,22 @@
 """Modeling file for HF compatibility and zero-shot experiments."""
 
-import torch
 import math
-
-from torch import Tensor
-from torch.nn.attention.flex_attention import create_block_mask, BlockMask, flex_attention
-from torch.nn.attention import bias as attn_bias
 from dataclasses import dataclass
-from typing import Union, Optional, Any
+from typing import Any
 
-
-from .raven_config_minimal import RavenConfig
-from transformers.cache_utils import Cache, DynamicCache, StaticCache
+import torch
+import torch.nn.functional as F
+from torch import Tensor
+from torch.nn.attention import bias as attn_bias
+from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
 
 ###################### Huggingface Glue code I ##################################################################
-from transformers import PreTrainedModel, GenerationMixin
-from transformers.utils import ModelOutput
+from transformers import GenerationConfig, GenerationMixin, PreTrainedModel
+from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.generation.utils import GenerateDecoderOnlyOutput
+from transformers.utils import ModelOutput
 
-import torch.nn.functional as F
-from transformers import GenerationConfig
+from .raven_config_minimal import RavenConfig
 
 torch.backends.cuda.enable_math_sdp(False)
 
@@ -45,14 +42,14 @@ class RavenPreTrainedModel(PreTrainedModel):
 
 @dataclass
 class CausalLMOutputRecurrentLatents(ModelOutput):
-    loss: Optional[torch.Tensor] = None
-    log_ppl: Optional[torch.Tensor] = None
-    logits: Optional[torch.Tensor] = None
-    past_key_values: Optional[Cache] = None
-    latent_states: Optional[torch.Tensor] = None
-    hidden_states: Optional[torch.Tensor] = None
-    attention_maps: Optional[dict[int, torch.Tensor]] = None
-    stats: Optional[dict] = None
+    loss: torch.Tensor | None = None
+    log_ppl: torch.Tensor | None = None
+    logits: torch.Tensor | None = None
+    past_key_values: Cache | None = None
+    latent_states: torch.Tensor | None = None
+    hidden_states: torch.Tensor | None = None
+    attention_maps: dict[int, torch.Tensor] | None = None
+    stats: dict | None = None
 
 
 ###################### Minimal implementation from here ############################################################
@@ -94,7 +91,7 @@ class HuginnDynamicCache(DynamicCache):
         key_states: torch.Tensor,
         value_states: torch.Tensor,
         step_idx_tensor: torch.Tensor,
-        lookup_strategy: Optional[str] = None,
+        lookup_strategy: str | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         step_idx: int = int(step_idx_tensor)  # todo: fix dicts with tensor step_idx, currently the memberships fail
         lookup_strategy = self.lookup_strategy if lookup_strategy is None else lookup_strategy
@@ -253,7 +250,7 @@ class HuginnStaticCache(Cache):
         hidden_dim: int,
         batch_size: int = 1,
         lookup_strategy: str = "full",
-        device: Optional[Union[torch.device, str]] = None,
+        device: torch.device | str | None = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         super().__init__()
@@ -290,7 +287,7 @@ class HuginnStaticCache(Cache):
         key_states: torch.Tensor,
         value_states: torch.Tensor,
         step_idx: torch.Tensor,
-        lookup_strategy: Optional[str] = None,
+        lookup_strategy: str | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if step_idx == 0:
             self._seen_tokens += key_states.shape[-2]
@@ -326,9 +323,7 @@ class HuginnStaticCache(Cache):
                     self.key_cache[max_valid_step, torch.arange(self._seen_tokens)],
                     self.value_cache[max_valid_step, torch.arange(self._seen_tokens)],
                 )
-            return self.key_cache[step_idx, :, :, : self._seen_tokens], self.value_cache[
-                step_idx, :, :, : self._seen_tokens
-            ]
+            return self.key_cache[step_idx, :, :, : self._seen_tokens], self.value_cache[step_idx, :, :, : self._seen_tokens]
         elif lookup_strategy == "skip":
             valid_mask = self.valid_mask[step_idx, : self._seen_tokens]
             return (
@@ -381,8 +376,12 @@ class CausalSelfAttention(torch.nn.Module):
         self.Wqkv = torch.nn.Linear(config.n_embd, shape)
         if config.qk_bias:
             self.qk_bias = torch.nn.Parameter(torch.zeros(2, 1, self.n_head, self.head_dim))
-        self.q_norm = RMSNorm(config.num_attention_heads * config.head_dim, eps=config.norm_eps)  # unlike olmo, only on the head dim!
-        self.k_norm = RMSNorm(config.num_key_value_heads * config.head_dim, eps=config.norm_eps)  # thus post q_norm does not need reshape
+        self.q_norm = RMSNorm(
+            config.num_attention_heads * config.head_dim, eps=config.norm_eps
+        )  # unlike olmo, only on the head dim!
+        self.k_norm = RMSNorm(
+            config.num_key_value_heads * config.head_dim, eps=config.norm_eps
+        )  # thus post q_norm does not need reshape
         self.proj = torch.nn.Linear(self.n_head * self.head_dim, config.n_embd, bias=False)
 
     def forward(
@@ -390,8 +389,8 @@ class CausalSelfAttention(torch.nn.Module):
         x: Tensor,
         freqs_cis: Tensor,
         block_idx: torch.Tensor,
-        mask: Optional[BlockMask] = None,
-        past_key_values: Optional[ValidCache] = None,
+        mask: BlockMask | None = None,
+        past_key_values: ValidCache | None = None,
     ) -> Tensor:
         B, S, E = x.shape  # batch size, sequence length, embedding dimensionality (n_embd)
         q, k, v = self.Wqkv(x).split(self.chunks, dim=2)
@@ -422,7 +421,7 @@ class CausalSelfAttention(torch.nn.Module):
                 else:
                     y = torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=False)
             else:
-                if self.n_head != self.n_kv_heads: # GQA case
+                if self.n_head != self.n_kv_heads:  # GQA case
                     repeat_factor = self.n_head // self.n_kv_heads
                     k = k.repeat_interleave(repeat_factor, dim=1)
                     v = v.repeat_interleave(repeat_factor, dim=1)
@@ -466,8 +465,8 @@ class SandwichBlock(torch.nn.Module):
         x: Tensor,
         freqs_cis: Tensor,
         step_idx: int,
-        mask: Optional[BlockMask] = None,
-        past_key_values: Optional[ValidCache] = None,
+        mask: BlockMask | None = None,
+        past_key_values: ValidCache | None = None,
     ) -> Tensor:
         attn_out = self.attn(self.norm_1(x), freqs_cis, step_idx, mask, past_key_values)
         x = self.norm_2(attn_out + x)
@@ -489,8 +488,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         prelude = torch.nn.ModuleList(SandwichBlock(config, layer_id=i) for i in range(config.n_layers_in_prelude))
         adapter = torch.nn.Linear(config.n_embd * 2, config.n_embd, bias=config.bias)
         core_block = torch.nn.ModuleList(
-            SandwichBlock(config, layer_id=i + config.n_layers_in_prelude)
-            for i in range(config.n_layers_in_recurrent_block)
+            SandwichBlock(config, layer_id=i + config.n_layers_in_prelude) for i in range(config.n_layers_in_recurrent_block)
         )
         o = config.n_layers_in_prelude + config.n_layers_in_recurrent_block * config.mean_recurrence
         coda = torch.nn.ModuleList(SandwichBlock(config, layer_id=i + o) for i in range(config.n_layers_in_coda))
@@ -529,10 +527,10 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
     def compile_mask(
         self,
         input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[ValidCache] = None,
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: ValidCache | None = None,
         pad_token_id=65509,
-    ) -> Optional[BlockMask]:
+    ) -> BlockMask | None:
         batch_size, seq_len = input_ids.shape[0], input_ids.shape[1]
 
         # If no padding and no attention mask, no need for a mask
@@ -637,13 +635,13 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
     def forward(
         self,
         input_ids: torch.Tensor,
-        input_embeds: Optional[torch.Tensor] = None,
-        input_states: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,  # binary  mask of shape q x kv, True=valid position
-        position_ids: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None,
-        num_steps: Optional[torch.Tensor] = None,
-        past_key_values: Optional[ValidCache] = None,
+        input_embeds: torch.Tensor | None = None,
+        input_states: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,  # binary  mask of shape q x kv, True=valid position
+        position_ids: torch.Tensor | None = None,
+        labels: torch.Tensor | None = None,
+        num_steps: torch.Tensor | None = None,
+        past_key_values: ValidCache | None = None,
         output_details: dict = {
             "return_logits": True,
             "return_latents": True,
@@ -651,7 +649,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
             "return_stats": False,
         },
         use_cache: bool = False,
-        cache_position: Optional[torch.Tensor] = None,
+        cache_position: torch.Tensor | None = None,
         init_scale: float = 1.0,
         **kwargs,
     ) -> CausalLMOutputRecurrentLatents:
@@ -702,12 +700,10 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         # Prediction head, assuming labels really are labels and not equal to input_ids
         if labels is not None:
             logits = self.lm_head(x).float()
-            loss = torch.nn.functional.cross_entropy(
-                logits.view(-1, logits.shape[-1]), labels.view(-1), ignore_index=-100
-            )
+            loss = torch.nn.functional.cross_entropy(logits.view(-1, logits.shape[-1]), labels.view(-1), ignore_index=-100)
             log_ppl = loss.clone().detach().exp()
         else:
-            logits = self.lm_head(x)#.float()
+            logits = self.lm_head(x)  # .float()
             loss, log_ppl = torch.as_tensor(0.0), torch.as_tensor(0.0)
 
         return CausalLMOutputRecurrentLatents(
@@ -729,9 +725,9 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         input_states: torch.Tensor,
         freqs_cis,
         block_idx: torch.Tensor,
-        mask: Optional[BlockMask],
-        past_key_values: Optional[ValidCache] = None,
-        num_steps: Optional[torch.Tensor] = None,
+        mask: BlockMask | None,
+        past_key_values: ValidCache | None = None,
+        num_steps: torch.Tensor | None = None,
         init_scale: float = 1.0,
     ):
         x = xk = self.initialize_state(input_embeds, scale=init_scale) if input_states is None else input_states.clone()
@@ -765,7 +761,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         x,
         input_embeds,
         freqs_cis,
-        mask: Optional[BlockMask],
+        mask: BlockMask | None,
         past_key_values,
         block_idx: torch.Tensor,
         current_step: int | Tensor,
@@ -782,11 +778,11 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         self,
         input_embeds,
         input_states,
-        position_ids: Optional[torch.Tensor] = None,
-        cache_position: Optional[torch.Tensor] = None,
+        position_ids: torch.Tensor | None = None,
+        cache_position: torch.Tensor | None = None,
         block_idx: torch.Tensor = torch.tensor(0, dtype=torch.long),
-        attention_mask: Optional[BlockMask] = None,
-        past_key_values: Optional[ValidCache] = None,
+        attention_mask: BlockMask | None = None,
+        past_key_values: ValidCache | None = None,
         current_step: int = 0,
     ):
         if position_ids is None and cache_position is None:
@@ -809,10 +805,10 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
     def predict_from_latents(
         self,
         latents,
-        attention_mask: Optional[BlockMask] = None,
-        position_ids: Optional[torch.Tensor] = None,
-        cache_position: Optional[torch.Tensor] = None,
-        past_key_values: Optional[ValidCache] = None,
+        attention_mask: BlockMask | None = None,
+        position_ids: torch.Tensor | None = None,
+        cache_position: torch.Tensor | None = None,
+        past_key_values: ValidCache | None = None,
     ):
         if position_ids is None and cache_position is None:
             freqs_cis = self.freqs_cis[:, : latents.shape[1]]
@@ -841,11 +837,11 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
     def embed_inputs(
         self,
         input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.Tensor] = None,
-        past_key_values: Optional[ValidCache] = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
+        past_key_values: ValidCache | None = None,
         use_cache: bool = False,
-        cache_position: Optional[torch.Tensor] = None,
+        cache_position: torch.Tensor | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Support multiple position formats:
@@ -931,10 +927,10 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
     def prepare_inputs_for_generation(
         self,
         input_ids: torch.Tensor,
-        past_key_values: Optional[Cache] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        cache_position: Optional[torch.Tensor] = None,
+        past_key_values: Cache | None = None,
+        attention_mask: torch.Tensor | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        cache_position: torch.Tensor | None = None,
         cache_lookup_strategy: str = "full",
         **kwargs,
     ):
@@ -991,7 +987,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
     def _prep_generate_args(
         self,
         input_ids: torch.Tensor,
-        generation_config: Optional[GenerationConfig] = None,  # type: ignore
+        generation_config: GenerationConfig | None = None,  # type: ignore
         cache_lookup_strategy: str = "full",
         model_kwargs: dict = {},
     ):
@@ -1027,14 +1023,14 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
     def generate_minimal(
         self,
         input_ids: torch.Tensor,
-        generation_config: Optional[GenerationConfig] = None,  # type: ignore
+        generation_config: GenerationConfig | None = None,  # type: ignore
         tokenizer=None,
         streamer=None,
         continuous_compute=False,  # warm-start state / continuous CoT
         init_scale: float = 1.0,
         cache_lookup_strategy: str = "full",
         **model_kwargs,
-    ) -> Union[torch.Tensor, dict[str, Any]]:
+    ) -> torch.Tensor | dict[str, Any]:
         """Minimal single-sequence generation. Template for more complicated generate tasks"""
         model_kwargs, generation_config, max_new_tokens = self._prep_generate_args(
             input_ids, generation_config, cache_lookup_strategy
@@ -1096,16 +1092,16 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
     def generate_with_adaptive_compute(
         self,
         input_ids: torch.Tensor,
-        generation_config: Optional[GenerationConfig] = None,  # type: ignore
+        generation_config: GenerationConfig | None = None,  # type: ignore
         tokenizer=None,
         streamer=None,
         continuous_compute=False,  # warm-start state / continuous CoT
         criterion="none",  # off by default, turn on by choosing an exit criterion
-        exit_threshold: Union[str, float, int] = "auto",
+        exit_threshold: str | float | int = "auto",
         init_scale: float = 1.0,
         cache_lookup_strategy: str = "full",
         **model_kwargs,
-    ) -> Union[torch.Tensor, GenerateDecoderOnlyOutput]:
+    ) -> torch.Tensor | GenerateDecoderOnlyOutput:
         """
         Generate tokens with adaptive compute. This is NOT the most efficient implementation.
         For batches, on each token, we iterate until the entire batch finishes.
@@ -1227,9 +1223,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
 
                     # Check for new exits, respecting unfinished_sequences
                     new_exits = (
-                        exit_values < exit_threshold
-                        if criterion != "argmax-stability"
-                        else exit_values >= exit_threshold
+                        exit_values < exit_threshold if criterion != "argmax-stability" else exit_values >= exit_threshold
                     )
                     new_exits = new_exits & ~exit_reached & unfinished_sequences.bool()
 
@@ -1287,11 +1281,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
 
             # Check for stop tokens and update unfinished sequences
             for i in range(batch_size):
-                if (
-                    unfinished_sequences[i].bool()
-                    and stop_tokens is not None
-                    and next_token[i, 0].item() in stop_tokens
-                ):
+                if unfinished_sequences[i].bool() and stop_tokens is not None and next_token[i, 0].item() in stop_tokens:
                     unfinished_sequences[i] = 0
 
             # Apply any custom stopping criteria
@@ -1376,7 +1366,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
     def generate_speculative(
         self,
         input_ids: torch.Tensor,
-        generation_config: Optional[GenerationConfig] = None,  # type: ignore
+        generation_config: GenerationConfig | None = None,  # type: ignore
         tokenizer=None,
         streamer=None,
         continuous_compute=False,  # warm-start state / continuous CoT
@@ -1387,7 +1377,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         verification_threshold=1,
         num_steps: int = 32,  # intercept deliberately
         **model_kwargs,
-    ) -> Union[torch.Tensor, dict[str, Any]]:
+    ) -> torch.Tensor | dict[str, Any]:
         """Batched speculative decoding with per-sequence acceptance."""
         assert lookahead_for_draft > 0
         pad_id = 65509
@@ -1450,16 +1440,14 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
             verified_next_token_preds = outputs.logits.argmax(dim=-1)
 
             if verification_threshold >= 1:
-                mismatched_tokens = (
-                    verified_next_token_preds[:, -lookahead_for_draft:] != drafted_inputs[:, current_len:]
-                )
+                mismatched_tokens = verified_next_token_preds[:, -lookahead_for_draft:] != drafted_inputs[:, current_len:]
                 not_all_matched, first_mismatch = torch.max(mismatched_tokens, dim=1)
             else:
                 verified_logits = outputs.logits[:, -lookahead_for_draft:, :]
                 verified_probs = F.softmax(verified_logits, dim=-1)
-                drafted_token_probs = torch.gather(
-                    verified_probs, -1, drafted_inputs[:, current_len:].unsqueeze(-1)
-                ).squeeze(-1)
+                drafted_token_probs = torch.gather(verified_probs, -1, drafted_inputs[:, current_len:].unsqueeze(-1)).squeeze(
+                    -1
+                )
                 max_probs = verified_probs.max(dim=-1)[0]
                 verification_passed = drafted_token_probs >= verification_threshold * max_probs
                 not_all_matched, first_mismatch = torch.max(~verification_passed, dim=1)

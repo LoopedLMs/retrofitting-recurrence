@@ -1,9 +1,5 @@
-from transformers import (
-    AutoConfig,
-    AutoModelForCausalLM,
-    AutoTokenizer
-)
 import torch
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 model_name = "models/Llama-3.2-1B"
 cfg = AutoConfig.from_pretrained(model_name)
@@ -11,8 +7,8 @@ cfg.tie_word_embeddings = False
 model = AutoModelForCausalLM.from_pretrained(model_name, config=cfg)
 
 with torch.no_grad():
-    inp = model.get_input_embeddings() # nn.Embedding
-    out = model.get_output_embeddings() # nn.Linear
+    inp = model.get_input_embeddings()  # nn.Embedding
+    out = model.get_output_embeddings()  # nn.Linear
     out.weight.copy_(inp.weight)
 
 print("same after copy? ", torch.equal(model.get_input_embeddings().weight, model.get_output_embeddings().weight))
@@ -20,10 +16,7 @@ print("same after copy? ", torch.equal(model.get_input_embeddings().weight, mode
 # print(model.get_output_embeddings())
 if getattr(model, "_keys_to_ignore_on_save", None):
     print(model._keys_to_ignore_on_save)
-    model._keys_to_ignore_on_save = [
-        k for k in model._keys_to_ignore_on_save
-        if "lm_head.weight" not in k
-    ]
+    model._keys_to_ignore_on_save = [k for k in model._keys_to_ignore_on_save if "lm_head.weight" not in k]
 
 model.save_pretrained(f"{model_name}-untied")
 tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -32,7 +25,7 @@ tokenizer.save_pretrained(f"{model_name}-untied")
 model = AutoModelForCausalLM.from_pretrained(model_name, config=cfg)
 untied_model, info = AutoModelForCausalLM.from_pretrained(f"{model_name}-untied", output_loading_info=True)
 
-if torch.equal(model.get_input_embeddings().weight,model.get_output_embeddings().weight):
+if torch.equal(model.get_input_embeddings().weight, model.get_output_embeddings().weight):
     print("BAD: og model weights same")
 else:
     print("GOOD: og model weights diff")

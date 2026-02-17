@@ -1,3 +1,9 @@
+cd "$(dirname "$0")/.."
+uv sync
+source .venv/bin/activate
+source shells/machine_config.sh
+validate_config || exit 1
+
 # To run any of these evals for non_recurrent models simply remove `mean_recurrence=${MEAN_RECURRENCE},`
 OUT_ROOT="eval_outputs"
 MODEL_PATH=

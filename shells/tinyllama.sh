@@ -1,3 +1,9 @@
+cd "$(dirname "$0")/.."
+uv sync
+source .venv/bin/activate
+source shells/machine_config.sh
+validate_config || exit 1
+
 #### Figure 4 -- 8 x 4 gpus
 # tinyllama 4,8,4 init, muon
 python train.py --epochs=1 --max_length=1024 --out_path=huginn_llama --optim_config.lr=5e-5 --model_name="smcleish/Recurrent-TinyLlama-3T-untrained" --preprocessed_data_path="$PROCESSED_DATA_PATH/smcleish/Recurrent-TinyLlama-3T-untrained/tinyllama_1_1b_packed_350b_sample_wrapped_packing/dataset" --is_parquet_dataset=true --scheduler_args.cooldown=0.9 --scheduler_args.warmup=0.005 --max_grad_norm=1.0 --micro_batch_size=8 --batch_size=32 --no_amp=false --max_steps=25000 --compile=false --save_interval=1000 --save_n_mins_before_timeout=5 --mean_recurrence_schedule.turn_on=true --mean_recurrence_schedule.warmup=0.25 --muon.use_muon=true --muon.lr=0.001

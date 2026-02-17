@@ -1,5 +1,7 @@
 # Teaching Pretrained Language Models to Think Deeper with Retrofitted Recurrence
 
+> **Fork:** This is a fork of [mcleish7/retrofitting-recurrence](https://github.com/mcleish7/retrofitting-recurrence)
+
 A joint project by: Sean McLeish, Ang Li, John Kirchenbauer, Dayal Singh Kalra, Brian R. Bartoldson, Bhavya Kailkhura, Avi Schwarzschild, Jonas Geiping, Tom Goldstein, Micah Goldblum
 
 <p align="center">

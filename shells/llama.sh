@@ -1,3 +1,9 @@
+cd "$(dirname "$0")/.."
+uv sync
+source .venv/bin/activate
+source shells/machine_config.sh
+validate_config || exit 1
+
 #### Figure 2 -- 64 x 4 gpus
 # init from scratch
 python train.py --epochs=1 --max_length=1024 --out_path=huginn_llama --optim_config.lr=5e-5 --model_name="smcleish/Recurrent-Llama-3.2-2-4-2-untrained" --preprocessed_data_path="$PROCESSED_DATA_PATH/smcleish/Recurrent-Llama-3.2-2-4-2-untrained/llama_1b_packed_350b_sample_wrapped_packing/dataset" --scheduler_args.cooldown=0.0 --scheduler_args.warmup=0.00008 --max_grad_norm=1.0 --micro_batch_size=8 --batch_size=16 --compile=false --init_from_scratch=true --save_n_mins_before_timeout=10 --no_amp=false --save_interval=1000 --is_parquet_dataset=true --parquet_dataset_max_tokens=250_000_000_000

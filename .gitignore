@@ -1,10 +1,28 @@
-models/*
-datasets/
-outputs*/
+# Machine-specific config
+shells/machine_config.sh
 
-*.pyc
-*.out
+# Local files
 *.core
-inductor_cache/
-huginn_llama/
+*.out
 convert_pretrained_model/models/
+datasets/
+huginn_llama/
+inductor_cache/
+models/*
+outputs*/
+slurm_logs/
+
+# Python
+*$py.class
+*.py[cod]
+*.pyc
+__pycache__/
+
+# Ruff
+.ruff_cache/
+
+# UV
+.venv/
+
+# W&B
+wandb/

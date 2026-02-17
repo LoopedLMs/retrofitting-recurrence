@@ -1,21 +1,19 @@
-from transformers.models.llama.modeling_llama import (
-    LlamaModel,
-    LlamaForCausalLM,
-    LlamaConfig,
-    LlamaDecoderLayer,
-    LlamaRMSNorm,
-    LlamaRotaryEmbedding,
-    LlamaMLP,
-)
-from torch import nn
+
 import torch
-from typing import Callable, List, Optional, Tuple, Union
+from torch import nn
+from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import BaseModelOutputWithPast
+from transformers.models.llama.modeling_llama import (
+    LlamaConfig,
+    LlamaDecoderLayer,
+    LlamaForCausalLM,
+    LlamaModel,
+    LlamaRMSNorm,
+    LlamaRotaryEmbedding,
+)
 from transformers.processing_utils import Unpack
-import random
-from transformers.activations import ACT2FN
 
 
 class LoopedLlamaMLP(nn.Module):
@@ -51,6 +49,7 @@ class LoopedLlamaDecoderLayer(LlamaDecoderLayer):
             self.self_attn.layer_idx = saved_cache_idx
         return out
 
+
 class LoopConfig:
     num_rec = 2
     start_index = 4
@@ -68,9 +67,7 @@ class LoopConfig:
                     raise ValueError(f"Unknown config key: {key}")
 
     def __repr__(self):
-        return str(
-            {key: getattr(self, key) for key in vars(self) if not key.startswith("__")}
-        )
+        return str({key: getattr(self, key) for key in vars(self) if not key.startswith("__")})
 
 
 class LoopedLlamaForCausalLM(LlamaForCausalLM):
@@ -102,14 +99,9 @@ class LoopedLlamaModel(LlamaModel):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = nn.Embedding(
-            config.vocab_size, config.hidden_size, self.padding_idx
-        )
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList(
-            [
-                LoopedLlamaDecoderLayer(config, layer_idx)
-                for layer_idx in range(config.num_hidden_layers)
-            ]
+            [LoopedLlamaDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.rotary_emb = LlamaRotaryEmbedding(config=config)
@@ -129,13 +121,11 @@ class LoopedLlamaModel(LlamaModel):
         self.loop_config = LoopConfig(args)
 
         i, j = self.loop_config.start_index, self.loop_config.block_size
-        prelude_ind, rec_layers_ind, coda_ind = self.get_split(
-            self.loop_config.num_rec, self.loop_config.remove_layers, i, j
-        )
+        prelude_ind, rec_layers_ind, coda_ind = self.get_split(self.loop_config.num_rec, self.loop_config.remove_layers, i, j)
         if self.loop_config.coda_size is not None:
-            coda_ind = coda_ind[:self.loop_config.coda_size]
+            coda_ind = coda_ind[: self.loop_config.coda_size]
         if self.loop_config.prelude_size is not None:
-            prelude_ind = prelude_ind[:self.loop_config.prelude_size]
+            prelude_ind = prelude_ind[: self.loop_config.prelude_size]
 
         print(f"regular model: {list(range(self.config.num_hidden_layers))}")
         print(f"prelude: {prelude_ind}")
@@ -150,37 +140,25 @@ class LoopedLlamaModel(LlamaModel):
     def forward(
         self,
         input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        use_cache: bool | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = None,
+        cache_position: torch.LongTensor | None = None,
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
-    ) -> Union[Tuple, BaseModelOutputWithPast]:
-        output_attentions = (
-            output_attentions
-            if output_attentions is not None
-            else self.config.output_attentions
-        )
-        output_hidden_states = (
-            output_hidden_states
-            if output_hidden_states is not None
-            else self.config.output_hidden_states
-        )
+    ) -> tuple | BaseModelOutputWithPast:
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         use_cache = use_cache if use_cache is not None else self.config.use_cache
 
         if (input_ids is None) ^ (inputs_embeds is not None):
-            raise ValueError(
-                "You must specify exactly one of input_ids or inputs_embeds"
-            )
+            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
         if self.gradient_checkpointing and self.training and use_cache:
-            logger.warning_once(
-                "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`."
-            )
+            logger.warning_once("`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.")
             use_cache = False
 
         if inputs_embeds is None:
@@ -190,9 +168,7 @@ class LoopedLlamaModel(LlamaModel):
             past_key_values = DynamicCache()
 
         if cache_position is None:
-            past_seen_tokens = (
-                past_key_values.get_seq_length() if past_key_values is not None else 0
-            )
+            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
             cache_position = torch.arange(
                 past_seen_tokens,
                 past_seen_tokens + inputs_embeds.shape[1],
@@ -276,7 +252,6 @@ class LoopedLlamaModel(LlamaModel):
                 this_layer_count = None
 
                 for idx, decoder_layer in enumerate(layers):
-
                     if output_hidden_states:
                         all_hidden_states += (hidden_states.clone().detach(),)
 
@@ -297,6 +272,5 @@ class LoopedLlamaModel(LlamaModel):
 
                     if output_attentions:
                         all_self_attns += (layer_outputs[1],)
-
 
         return hidden_states, all_hidden_states, all_self_attns

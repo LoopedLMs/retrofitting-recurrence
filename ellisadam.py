@@ -218,12 +218,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-import torch
-from torch.optim import Optimizer
-from torch import Tensor
-from typing import List, Optional, Tuple, Union
 import copy
 from math import sqrt
+from typing import Optional
+
+import torch
+from torch import Tensor
+from torch.optim import Optimizer
+
 
 def _parse_str_to_dtype(string_rep: str):
     if "bf16" in string_rep:
@@ -233,31 +235,31 @@ def _parse_str_to_dtype(string_rep: str):
     else:
         return torch.float32
 
-    
+
 class ELLISAdam(Optimizer):
     # https://github.com/seal-rg/recurrent-pretraining/blob/main/recpre/optim.py#L728
     def __init__(
         self,
         params,
-        lr: Union[float, torch.Tensor] = 3e-4,
-        betas: Tuple[float, float] = (0.9, 0.99),
+        lr: float | torch.Tensor = 3e-4,
+        betas: tuple[float, float] = (0.9, 0.99),
         eps: float = 1e-6,
         weight_decay: float = 1e-2,
         *,
-        foreach: Optional[bool] = None,
+        foreach: bool | None = None,
         nesterov: bool = False,
         eps_adjustment: bool = False,
         update_clipping: bool = False,
         kahan_sum_compensation: bool = False,
-        buffer_dtype: Optional[Union[torch.dtype, str]] = None,  # can be torch.float16 / torch.bfloat16
+        buffer_dtype: torch.dtype | str | None = None,  # can be torch.float16 / torch.bfloat16
         running_init: bool = False,
         tensor_wise_finite_check: bool = False,
         tensor_wise_gradient_normalization: bool = False,
         adafactor_like_beta_corrections: bool = False,
         atan_adam: bool = False,
         decouple_wd: bool = True,
-        brute_force_clip: Optional[float] = None,
-        poly_ema_p: Optional[float] = None,
+        brute_force_clip: float | None = None,
+        poly_ema_p: float | None = None,
     ):
         defaults = dict(
             lr=torch.tensor(lr, dtype=torch.float32),
@@ -415,17 +417,17 @@ class ELLISAdam(Optimizer):
 
 
 def _single_tensor_modded_adamw(
-    params: List[Tensor],
-    grads: List[Tensor],
-    exp_avgs: List[Tensor],
-    exp_avg_sqs: List[Tensor],
-    state_steps: List[Tensor],
-    kahan_comps: List[Tensor],
+    params: list[Tensor],
+    grads: list[Tensor],
+    exp_avgs: list[Tensor],
+    exp_avg_sqs: list[Tensor],
+    state_steps: list[Tensor],
+    kahan_comps: list[Tensor],
     *,
     beta1: float,
     beta2: float,
-    lr: Union[Tensor, float],
-    init_lr: Union[Tensor, float],
+    lr: Tensor | float,
+    init_lr: Tensor | float,
     weight_decay: float,
     eps: float,
     nesterov: bool = False,
@@ -438,8 +440,8 @@ def _single_tensor_modded_adamw(
     adafactor_like_beta_corrections: bool = False,
     atan_adam: bool = False,
     decouple_wd: bool = False,
-    brute_force_clip: Optional[float] = None,
-    poly_ema_p: Optional[float] = None,
+    brute_force_clip: float | None = None,
+    poly_ema_p: float | None = None,
 ):
     if adafactor_like_beta_corrections:
         # update group step

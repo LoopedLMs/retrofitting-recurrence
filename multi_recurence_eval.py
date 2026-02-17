@@ -1,11 +1,12 @@
-from transformers import AutoModelForCausalLM, AutoTokenizer
+import json
+import os
+
 import torch
 from datasets import load_dataset
-from tqdm import tqdm
-from typing import List
-import os
-import json
 from jsonargparse import CLI
+from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
 
 def get_model_and_tokenizer(model_name, device):
     model = AutoModelForCausalLM.from_pretrained(
@@ -22,16 +23,17 @@ def get_model_and_tokenizer(model_name, device):
 
     return model, tokenizer
 
+
 @torch.no_grad()
 def main(
-    model_name: str, 
-    ckpts: List[int], 
-    batch_size: int = 64, 
+    model_name: str,
+    ckpts: list[int],
+    batch_size: int = 64,
     device: str = "cuda",
-    eval_file_path: str = "path/eval_dataset/shard-00512.parquet"
+    eval_file_path: str = "path/eval_dataset/shard-00512.parquet",
 ):
     dataset = load_dataset(
-        "parquet", 
+        "parquet",
         data_files=eval_file_path,
     )["train"].select(range(1024))
     dataset.set_format("pt")
@@ -55,11 +57,11 @@ def main(
                 labels = torch.stack(batch["labels"], dim=0)
                 mask = (labels != -100).float()
 
-                for num_rec in [1,2,4,8,16,32,64]:
-                    logits = model(input_ids, num_steps=torch.tensor([num_rec,0], device=model.device)).logits
+                for num_rec in [1, 2, 4, 8, 16, 32, 64]:
+                    logits = model(input_ids, num_steps=torch.tensor([num_rec, 0], device=model.device)).logits
 
                     loss = torch.nn.functional.cross_entropy(
-                        logits.view(-1, logits.shape[-1]), labels.view(-1), ignore_index=-100, reduction='none' 
+                        logits.view(-1, logits.shape[-1]), labels.view(-1), ignore_index=-100, reduction="none"
                     )
                     loss = loss.view(logits.size(0), logits.size(1))
                     loss_per_sample = (loss * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
@@ -76,6 +78,7 @@ def main(
         os.makedirs(output_dir, exist_ok=True)
         with open(f"{output_dir}/chkpt_{ckpt}.json", "w") as f:
             json.dump(output, f)
+
 
 if __name__ == "__main__":
     CLI(main)
