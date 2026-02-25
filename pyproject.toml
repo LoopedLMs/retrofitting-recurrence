@@ -14,6 +14,7 @@ dependencies = [
     "matplotlib>=3.10.8",
     "muon-optimizer",
     "natsort>=8.4.0",
+    "peft>=0.15.0",
     "seaborn>=0.13.2",
     "torch==2.9.0",
     "torchdata>=0.11.0",

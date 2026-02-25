@@ -104,6 +104,12 @@ class CLISettings:
         )
     )
     parquet_epoching_flag_use_with_real_caution: int = 1
+    lora: dict[str, Any] = field(
+        default_factory=lambda: dict(enabled=False, r=16, lora_alpha=32, target_modules="all-linear", lora_dropout=0.0)
+    )
+    distillation: dict[str, Any] = field(
+        default_factory=lambda: dict(enabled=False, teacher_model_name=None, temperature=2.0, alpha=0.5)
+    )
 
     def __post_init__(self):
         assert self.micro_batch_size <= self.batch_size, "batch size must be less than micro batch size"
@@ -137,6 +143,14 @@ class CLISettings:
             assert not self.compile_warmup_routine, "Can't use compile_warmup_routine with non_recurrent_model"
 
             self.no_monkeypatch_on_jonas_init = True  # turn off for normal models
+
+        if self.lora["enabled"]:
+            assert not self.muon["use_muon"], "LoRA is not compatible with Muon optimizer"
+            assert not self.use_ellis_adam["use_ellis_adam"], "LoRA is not compatible with ELLISAdam optimizer"
+            assert not self.throttle, "LoRA is not compatible with throttle"
+
+        if self.distillation["enabled"]:
+            assert self.distillation["teacher_model_name"] is not None, "teacher_model_name required for distillation"
 
 
 @dataclass
@@ -192,8 +206,14 @@ def save_checkpoint(state, agg_vars_dict, cfg):
         extras["mean_backprop_depth_scheduler"] = state["mean_backprop_depth_scheduler"].state_dict()
 
     unwrap = get_unwrapped_model(state)
+    if cfg.lora["enabled"]:
+        from peft import get_peft_model_state_dict
+
+        model_state = get_peft_model_state_dict(unwrap)
+    else:
+        model_state = unwrap.state_dict()
     ckpt = dict(
-        model=unwrap.state_dict(),
+        model=model_state,
         optimizer=optim_state_dict,
         scheduler=state["scheduler"].state_dict(),
         dataloader=dataloader_state,
@@ -213,7 +233,12 @@ def save_checkpoint(state, agg_vars_dict, cfg):
 def load_checkpoint(state, cfg, device):
     ckpt = torch.load(f"{cfg.resume_path}/chkpt.pt", map_location=device)
     unwrap = get_unwrapped_model(state)
-    unwrap.load_state_dict(ckpt["model"], strict=True)
+    if cfg.lora["enabled"]:
+        from peft import set_peft_model_state_dict
+
+        set_peft_model_state_dict(unwrap, ckpt["model"])
+    else:
+        unwrap.load_state_dict(ckpt["model"], strict=True)
     state["optimizer"].load_state_dict(ckpt["optimizer"])
 
     if cfg.mean_recurrence_schedule["turn_on"] and ("mean_recurrence_scheduler" in ckpt):
@@ -345,6 +370,21 @@ def startup(cfg: CLISettings):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    ##########  LoRA adapters      ##############
+    if cfg.lora["enabled"]:
+        from peft import LoraConfig, TaskType, get_peft_model
+
+        lora_config = LoraConfig(
+            r=cfg.lora["r"],
+            lora_alpha=cfg.lora["lora_alpha"],
+            target_modules=cfg.lora["target_modules"],
+            lora_dropout=cfg.lora["lora_dropout"],
+            task_type=TaskType.CAUSAL_LM,
+        )
+        model = get_peft_model(model, lora_config)
+        if is_main_process():
+            model.print_trainable_parameters()
+
     ##########  Distribute model   ##############
     if distributed:
         model = torch.nn.parallel.DistributedDataParallel(
@@ -453,8 +493,10 @@ def startup(cfg: CLISettings):
 
         optimizer.register_state_dict_pre_hook(gather)
     else:
-        # print(model.named_parameters())
-        if cfg.throttle:
+        if cfg.lora["enabled"]:
+            params = [p for p in model.parameters() if p.requires_grad]
+            optim_config = cfg.optim_config.copy()
+        elif cfg.throttle:
             recur_params = []
             non_recur_params = []
             for n, p in model.named_parameters():
@@ -472,6 +514,23 @@ def startup(cfg: CLISettings):
             params = model.parameters()
             optim_config = cfg.optim_config.copy()
         optimizer = torch.optim.AdamW(params, **optim_config)
+
+    ##########  Teacher model (distillation) ##############
+    teacher_model = None
+    if cfg.distillation["enabled"]:
+        teacher_model = AutoModelForCausalLM.from_pretrained(
+            cfg.distillation["teacher_model_name"],
+            trust_remote_code=True,
+            low_cpu_mem_usage=True,
+            device_map=local_device,
+            torch_dtype=weight_dtype,
+            attn_implementation="sdpa",
+        )
+        teacher_model.eval()
+        for p in teacher_model.parameters():
+            p.requires_grad_(False)
+        if is_main_process():
+            print(f"Loaded teacher model: {cfg.distillation['teacher_model_name']}")
 
     ##########     Data            ##############
     def format_and_tokenize_examples(examples):
@@ -626,6 +685,7 @@ def startup(cfg: CLISettings):
         "dataloader": dataloader,
         "distributed": distributed,
         "scheduler": scheduler,
+        "teacher_model": teacher_model,
     }
 
     if cfg.mean_recurrence_schedule["turn_on"]:
@@ -680,7 +740,7 @@ def startup(cfg: CLISettings):
 
 
 def distributed_and_agg_metrics(metrics_to_agg_data_step, metrics_to_agg_optim_step):
-    keys_to_mean = ["loss", "log_ppl"]
+    keys_to_mean = ["loss", "log_ppl", "kl_loss"]
 
     distributed = torch.distributed.is_initialized()
     rank = int(os.getenv("SLURM_PROCID", os.getenv("RANK", "0")))
@@ -815,10 +875,18 @@ def train(
         "return_stats": True,
     }
 
+    teacher_model = state.get("teacher_model")
+    if cfg.distillation["enabled"]:
+        distill_output_details = {**output_details, "return_logits": True}
+        distill_temperature = cfg.distillation["temperature"]
+        distill_alpha = cfg.distillation["alpha"]
+
     metrics_to_agg_data_step = {
         "loss": [],
         "log_ppl": [],
     }
+    if cfg.distillation["enabled"]:
+        metrics_to_agg_data_step["kl_loss"] = []
     world_size = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
 
     model_config = get_unwrapped_model(model).config
@@ -893,12 +961,79 @@ def train(
                     log_ppl = loss.clone().detach().exp()
                     return loss.detach(), log_ppl, model_config.num_hidden_layers, model_config.num_hidden_layers
 
-            fwd_bwd_func = non_rec_fwd_bwd if cfg.non_recurrent_model else tightly_scoped_fwd_bwd
-            loss, log_ppl, num_steps_no_grad, num_steps_with_grad = fwd_bwd_func(model, input_ids, labels)
+            def _compute_kl_distill_loss(student_logits, teacher_logits, labels):
+                """KL divergence between student and teacher on valid (non-padded) positions."""
+                valid_mask = labels != -100
+                if valid_mask.any():
+                    s_logits = student_logits[valid_mask] / distill_temperature
+                    t_logits = teacher_logits[valid_mask] / distill_temperature
+                    kl_loss = torch.nn.functional.kl_div(
+                        torch.nn.functional.log_softmax(s_logits, dim=-1),
+                        torch.nn.functional.softmax(t_logits, dim=-1),
+                        reduction="batchmean",
+                    ) * (distill_temperature**2)
+                else:
+                    kl_loss = student_logits.new_tensor(0.0)
+                return kl_loss
+
+            def distill_fwd_bwd(model, input_ids, labels):
+                with model.no_sync() if is_accumulating and state["distributed"] else nullcontext():
+                    with torch.autocast(**cfg.amp_args):
+                        outputs = model(input_ids, labels=labels, num_steps=num_steps, output_details=distill_output_details)
+                        student_logits = outputs["logits"]
+                        ce_loss = outputs["loss"]
+
+                        with torch.no_grad():
+                            teacher_logits = teacher_model(input_ids).logits
+
+                        kl_loss = _compute_kl_distill_loss(student_logits, teacher_logits, labels)
+                        loss = distill_alpha * ce_loss + (1 - distill_alpha) * kl_loss
+
+                    (loss / accumulation_steps).backward()
+                    return (
+                        loss.detach(),
+                        outputs["log_ppl"].detach(),
+                        outputs["stats"]["num_steps_no_grad"],
+                        outputs["stats"]["num_steps_with_grad"],
+                        kl_loss.detach().item(),
+                    )
+
+            def non_rec_distill_fwd_bwd(model, input_ids, labels):
+                with model.no_sync() if is_accumulating and state["distributed"] else nullcontext():
+                    with torch.autocast(**cfg.amp_args):
+                        student_logits = model(input_ids).logits
+
+                        with torch.no_grad():
+                            teacher_logits = teacher_model(input_ids).logits
+
+                        ce_loss = torch.nn.functional.cross_entropy(
+                            student_logits.view(-1, student_logits.shape[-1]), labels.view(-1), ignore_index=-100
+                        )
+                        kl_loss = _compute_kl_distill_loss(student_logits, teacher_logits, labels)
+                        loss = distill_alpha * ce_loss + (1 - distill_alpha) * kl_loss
+
+                    (loss / accumulation_steps).backward()
+                    log_ppl = ce_loss.clone().detach().exp()
+                    return (
+                        loss.detach(),
+                        log_ppl,
+                        model_config.num_hidden_layers,
+                        model_config.num_hidden_layers,
+                        kl_loss.detach().item(),
+                    )
+
+            if cfg.distillation["enabled"]:
+                fwd_bwd_func = non_rec_distill_fwd_bwd if cfg.non_recurrent_model else distill_fwd_bwd
+                loss, log_ppl, num_steps_no_grad, num_steps_with_grad, kl_loss_val = fwd_bwd_func(model, input_ids, labels)
+            else:
+                fwd_bwd_func = non_rec_fwd_bwd if cfg.non_recurrent_model else tightly_scoped_fwd_bwd
+                loss, log_ppl, num_steps_no_grad, num_steps_with_grad = fwd_bwd_func(model, input_ids, labels)
 
             # logging
             metrics_to_agg_data_step["loss"].append(loss.item())
             metrics_to_agg_data_step["log_ppl"].append(log_ppl.item())
+            if cfg.distillation["enabled"]:
+                metrics_to_agg_data_step["kl_loss"].append(kl_loss_val)
 
             if not is_accumulating:
                 if cfg.throttle:
