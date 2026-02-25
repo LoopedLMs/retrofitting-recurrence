@@ -1,4 +1,4 @@
-# Research Code - Looped LLMs from pretrained models
+# Research Code - Looped/Recurrent LLMs from pretrained models
 
 ## Philosophy
 Research code optimized for rapid iteration and debugging:
@@ -8,28 +8,18 @@ Research code optimized for rapid iteration and debugging:
 
 ## Code Standards
 - Type hints on all signatures (modern syntax: `str | None`, `list[int]`)
-- Self-documenting names > comments
 - Run ruff after changes: `uv run ruff format . && uv run ruff check --fix .`
 
-## Conventions
-- Files: `snake_case.py`
-- Classes: `PascalCase` 
-- Functions: `snake_case`
-- Constants: `UPPER_SNAKE_CASE`
-
 ## Package Management (CRITICAL)
-- ✅ ALWAYS: `uv add <package>`
-- ❌ NEVER: manually edit pyproject.toml
-- ❌ NEVER: `pip install` or `uv pip install`
+- ALWAYS: `uv add <package>`
+- NEVER: manually edit pyproject.toml
+- NEVER: `pip install` or `uv pip install`
 
 ## Running Code
-Python scripts must be run within the uv environment:
-- **Option 1**: `uv run python script.py` (recommended for one-off commands)
-- **Option 2**: Activate environment first with `source .venv/bin/activate`, then run normally
+Python scripts must be run within the uv environment
 
 ## Debugging
 Check `.venv` source code directly for library implementation details
 
-## Research Stack
-- Framework: PyTorch
-- Testing: pytest for core components only (skip for exploratory code)
+## Background Knowledge
+Paper summaries and research notes live in `./knowledge/`. Check there for context on relevant prior work (e.g. layer redundancy, recurrence retrofitting). The paper behind this repository is summarized in knowledge/summary_retrofitting_recurrence.md.

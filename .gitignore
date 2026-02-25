@@ -11,6 +11,7 @@ inductor_cache/
 models/*
 outputs*/
 slurm_logs/
+knowledge/
 
 # Python
 *$py.class
