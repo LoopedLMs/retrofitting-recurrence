@@ -24,7 +24,7 @@ export PROCESSED_DATA_PATH="$BASE_DIR/processed_datasets"
 # GPU jobs (training, evaluation)
 export SLURM_PARTITION_GPU="your-gpu-partition"
 export SLURM_QOS_GPU="your-gpu-qos"
-export SLURM_GPUS="2"
+export NUM_GPUS="${NUM_GPUS:-2}"               # Number of GPUs per job (overridable via env)
 export SLURM_MEM_GPU="64G"
 export SLURM_MAIL_USER="your.email@example.com"
 
