@@ -1580,6 +1580,27 @@ wheels = [
 ]
 
 [[package]]
+name = "peft"
+version = "0.18.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "accelerate" },
+    { name = "huggingface-hub" },
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "psutil" },
+    { name = "pyyaml" },
+    { name = "safetensors" },
+    { name = "torch" },
+    { name = "tqdm" },
+    { name = "transformers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d8/48/147b3ea999560b40a34fd78724c7777aa9d18409c2250bdcaf9c4f2db7fc/peft-0.18.1.tar.gz", hash = "sha256:2dd0d6bfce936d1850e48aaddbd250941c5c02fc8ef3237cd8fd5aac35e0bae2", size = 635030, upload-time = "2026-01-09T13:08:01.136Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b3/14/b4e3f574acf349ae6f61f9c000a77f97a3b315b4bb6ad03791e79ae4a568/peft-0.18.1-py3-none-any.whl", hash = "sha256:0bf06847a3551e3019fc58c440cffc9a6b73e6e2962c95b52e224f77bbdb50f1", size = 556960, upload-time = "2026-01-09T13:07:55.865Z" },
+]
+
+[[package]]
 name = "pillow"
 version = "12.1.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2186,9 +2207,11 @@ dependencies = [
     { name = "matplotlib" },
     { name = "muon-optimizer" },
     { name = "natsort" },
+    { name = "peft" },
     { name = "seaborn" },
     { name = "torch" },
     { name = "torchdata" },
+    { name = "tqdm" },
     { name = "transformers" },
 ]
 
@@ -2210,9 +2233,11 @@ requires-dist = [
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "muon-optimizer", git = "https://github.com/mcleish7/Muon.git" },
     { name = "natsort", specifier = ">=8.4.0" },
+    { name = "peft", specifier = ">=0.15.0" },
     { name = "seaborn", specifier = ">=0.13.2" },
     { name = "torch", specifier = "==2.9.0", index = "https://download.pytorch.org/whl/cu128" },
     { name = "torchdata", specifier = ">=0.11.0" },
+    { name = "tqdm", specifier = ">=4.67.3" },
     { name = "transformers", specifier = "==4.51.0" },
 ]
 

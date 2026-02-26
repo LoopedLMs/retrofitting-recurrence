@@ -28,6 +28,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from jsonargparse import CLI
+from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # Fallback calibration prompts (used when --use_builtin_prompts or dataset loading fails)
@@ -51,7 +52,7 @@ BUILTIN_PROMPTS = [
 ]
 
 
-def load_calibration_texts(num_samples: int = 256, max_chars: int = 512) -> list[str]:
+def load_calibration_texts(num_samples: int = 256) -> list[str]:
     """Load calibration texts from C4 validation split (matching ETD paper).
 
     Falls back to built-in prompts if the dataset can't be loaded.
@@ -63,10 +64,15 @@ def load_calibration_texts(num_samples: int = 256, max_chars: int = 512) -> list
         ds = load_dataset(
             "allenai/c4",
             "en",
-            split=f"validation[:{num_samples}]",
-            trust_remote_code=True,
+            split="validation",
+            streaming=True,
         )
-        texts = [ex["text"][:max_chars] for ex in ds if ex["text"].strip()]
+        texts = []
+        for ex in ds:
+            if ex["text"].strip():
+                texts.append(ex["text"])
+            if len(texts) >= num_samples:
+                break
         if len(texts) >= 16:
             print(f"  Loaded {len(texts)} calibration texts from C4")
             return texts
@@ -124,12 +130,14 @@ def kneedle(values: list[float], direction: str = "decreasing") -> int:
 
 def compute_layer_metrics(
     hidden_states: list[torch.Tensor],
+    mask: torch.Tensor | None = None,
 ) -> tuple[list[float], list[float]]:
     """Compute Block Influence and Angular Distance between consecutive layers.
 
     Args:
         hidden_states: List of (batch, seq_len, hidden_dim) tensors, one per layer
                        (including embedding layer at index 0).
+        mask: Optional (batch, seq_len) boolean mask. True = real token, False = padding.
 
     Returns:
         Tuple of (block_influence, angular_distance) lists, each of length num_layers.
@@ -145,15 +153,24 @@ def compute_layer_metrics(
         # Cosine similarity: (batch, seq_len)
         cos_sim = F.cosine_similarity(h_in, h_out, dim=-1)
 
-        # BI = 1 - E[cos_sim]  (averaged over batch and tokens)
-        bi = 1.0 - cos_sim.mean().item()
-        block_influence.append(bi)
+        if mask is not None:
+            # Only average over real (non-padding) positions
+            cos_sim = cos_sim.masked_fill(~mask, 0.0)
+            num_valid = mask.sum()
+            bi = 1.0 - (cos_sim.sum() / num_valid).item()
 
-        # Angular distance = (1/π) * arccos(cos_sim), averaged
-        # Clamp to avoid numerical issues with arccos
-        cos_sim_clamped = cos_sim.clamp(-1.0 + 1e-7, 1.0 - 1e-7)
-        ang_dist = (1.0 / math.pi) * torch.arccos(cos_sim_clamped)
-        angular_distance.append(ang_dist.mean().item())
+            cos_sim_clamped = cos_sim.clamp(-1.0 + 1e-7, 1.0 - 1e-7)
+            ang_dist = (1.0 / math.pi) * torch.arccos(cos_sim_clamped)
+            ang_dist = ang_dist.masked_fill(~mask, 0.0)
+            angular_distance.append((ang_dist.sum() / num_valid).item())
+        else:
+            bi = 1.0 - cos_sim.mean().item()
+
+            cos_sim_clamped = cos_sim.clamp(-1.0 + 1e-7, 1.0 - 1e-7)
+            ang_dist = (1.0 / math.pi) * torch.arccos(cos_sim_clamped)
+            angular_distance.append(ang_dist.mean().item())
+
+        block_influence.append(bi)
 
     return block_influence, angular_distance
 
@@ -311,13 +328,14 @@ def plot_metrics(
 
 
 def layer_analysis(
-    model_name: str = "meta-llama/Llama-3.2-1B",
+    model_name: str = "allenai/OLMo-2-0425-1B",
     device: str = "auto",
     dtype: str = "bfloat16",
-    max_tokens: int = 128,
-    num_samples: int = 256,
+    max_tokens: int = 4096,
+    num_samples: int = 10000,
+    batch_size: int = 8,
     use_builtin_prompts: bool = False,
-    target_recurrent_size: int | None = None,
+    target_recurrent_size: int | None = 4,
     save_plot: str | None = None,
 ) -> None:
     """Analyze layer redundancy and functional zones for a pretrained HF model.
@@ -364,28 +382,32 @@ def layer_analysis(
     print(f"Model has {num_layers} transformer layers")
 
     # --- Collect hidden states over calibration texts ---
-    print(f"Running {len(calibration_texts)} calibration texts...")
+    num_batches = (len(calibration_texts) + batch_size - 1) // batch_size
+    print(f"Running {len(calibration_texts)} calibration texts in {num_batches} batches (bs={batch_size})...")
     all_bi = [[] for _ in range(num_layers)]
     all_ang = [[] for _ in range(num_layers)]
 
-    with torch.no_grad():
-        for prompt in calibration_texts:
+    with torch.no_grad(), tqdm(total=len(calibration_texts), desc="Samples", unit="sample") as pbar:
+        for batch_start in range(0, len(calibration_texts), batch_size):
+            batch_texts = calibration_texts[batch_start : batch_start + batch_size]
             inputs = tokenizer(
-                prompt,
+                batch_texts,
                 return_tensors="pt",
                 truncation=True,
                 max_length=max_tokens,
+                padding=True,
             ).to(device)
 
             outputs = model(**inputs)
-            # hidden_states: tuple of (num_layers + 1) tensors, each (1, seq_len, hidden_dim)
-            # Index 0 = embedding output, index i = output of layer i
+            # hidden_states: tuple of (num_layers + 1) tensors, each (B, seq_len, hidden_dim)
             hidden_states = outputs.hidden_states
+            pad_mask = inputs["attention_mask"].bool()  # (B, seq_len)
 
-            bi_vals, ang_vals = compute_layer_metrics(hidden_states)
+            bi_vals, ang_vals = compute_layer_metrics(hidden_states, mask=pad_mask)
             for i in range(num_layers):
                 all_bi[i].append(bi_vals[i])
                 all_ang[i].append(ang_vals[i])
+            pbar.update(len(batch_texts))
 
     # Average over calibration prompts
     block_influence = [np.mean(scores) for scores in all_bi]

@@ -90,6 +90,7 @@ class CLISettings:
     )
     no_monkeypatch_on_jonas_init: bool = False
     throttle: bool = False
+    freeze_backbone: bool = False
     non_recurrent_model: bool = False
     muon: dict[float, Any] = field(default_factory=lambda: dict(use_muon=False, lr=0.005, weight_decay=1e-4))
     use_ellis_adam: dict[float, Any] = field(
@@ -370,6 +371,21 @@ def startup(cfg: CLISettings):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    ##########  Freeze backbone    ##############
+    if cfg.freeze_backbone:
+        trainable, frozen = 0, 0
+        for name, param in model.named_parameters():
+            if "adapter" in name:
+                param.requires_grad_(True)
+                trainable += param.numel()
+            else:
+                param.requires_grad_(False)
+                frozen += param.numel()
+        if is_main_process():
+            print(
+                f"Freeze backbone: {trainable:,} trainable params ({trainable / (trainable + frozen) * 100:.2f}%), {frozen:,} frozen"
+            )
+
     ##########  LoRA adapters      ##############
     if cfg.lora["enabled"]:
         from peft import LoraConfig, TaskType, get_peft_model
@@ -493,7 +509,7 @@ def startup(cfg: CLISettings):
 
         optimizer.register_state_dict_pre_hook(gather)
     else:
-        if cfg.lora["enabled"]:
+        if cfg.lora["enabled"] or cfg.freeze_backbone:
             params = [p for p in model.parameters() if p.requires_grad]
             optim_config = cfg.optim_config.copy()
         elif cfg.throttle:

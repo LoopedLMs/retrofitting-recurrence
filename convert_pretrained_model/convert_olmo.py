@@ -61,10 +61,10 @@ def get_llama_huginn_config(llama_config_name):
         "n_embd": llama_config.hidden_size,
         "n_heads": llama_config.num_attention_heads,
         "num_key_value_heads": llama_config.num_key_value_heads,  # 8,#32,
-        "n_layers": 14,
-        "n_layers_in_coda": 4,
-        "n_layers_in_prelude": 4,
-        "n_layers_in_recurrent_block": 6,
+        "n_layers": 16,
+        "n_layers_in_coda": 5,
+        "n_layers_in_prelude": 7,
+        "n_layers_in_recurrent_block": 4,
         "norm_eps": llama_config.rms_norm_eps,
         "vocab_size": llama_config.vocab_size,
         "padded_vocab_size": llama_config.vocab_size,
@@ -97,6 +97,13 @@ def weight_mapping(llama_state_dict, huginn_state_dict, mapping_cfg):
     huginn_state_dict["transformer.wte.weight"] = llama_state_dict["model.embed_tokens.weight"]
     huginn_state_dict["lm_head.weight"] = llama_state_dict["lm_head.weight"]
     huginn_state_dict["transformer.ln_f.weight"] = llama_state_dict["model.norm.weight"]
+
+    # Initialize adapter to [0 | I] so it passes through the prelude output
+    # and ignores the random initial state: adapter(cat([x, prelude_out])) = prelude_out
+    n_embd = huginn_state_dict["transformer.adapter.weight"].shape[0]
+    adapter_weight = torch.zeros(n_embd, 2 * n_embd, dtype=huginn_state_dict["transformer.adapter.weight"].dtype)
+    adapter_weight[:, n_embd:] = torch.eye(n_embd)
+    huginn_state_dict["transformer.adapter.weight"] = adapter_weight
 
     def copy_layer(src_i, tgt_prefix):
         """
@@ -221,16 +228,16 @@ def main():
     llama_model_name = "models/OLMo-2-0425-1B-step1907359"
     save_name = "models/recurrent_olmo_2_0425_1b_step1907359_4_6_4"
     looped_args = {
-        "prelude_size": 4,
-        "start_index": 6,
-        "block_size": 6,
-        "coda_size": 4,
+        "prelude_size": 7,
+        "start_index": 7,
+        "block_size": 4,
+        "coda_size": 5,
         "num_rec": 1,
     }
     mapping_cfg = {
-        "prelude_idx": [0, 1, 2, 3],
-        "core_idx": [6, 7, 8, 9, 10, 11],
-        "coda_idx": [12, 13, 14, 15],
+        "prelude_idx": [0, 1, 2, 3, 4, 5, 6],
+        "core_idx": [7, 8, 9, 10],
+        "coda_idx": [11, 12, 13, 14, 15],
     }
 
     looped_llama_model, llama_tokenizer = get_looped_llama(llama_model_name, looped_args)
