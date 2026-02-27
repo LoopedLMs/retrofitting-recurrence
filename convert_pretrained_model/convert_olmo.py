@@ -1,102 +1,78 @@
+import argparse
+import json
 import os
+from pathlib import Path
 
 import torch
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerBase
+
+from convert_pretrained_model.common import force_attn_impl, get_looped_model
 
 
-def get_edited_model(model_name, extra_args={}):
-    config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
-    if "llama" in model_name.lower():
-        config_args = {
-            "model_type": "looped_llama2",
-            "auto_map": {"AutoModelForCausalLM": "looped_llama.LoopedLlamaForCausalLM"},
-            "architectures": ["LoopedLlamaForCausalLM"],
-        }
-    elif "olmo-2" in model_name.lower():
-        config_args = {
-            "model_type": "looped_olmo2",
-            "auto_map": {"AutoModelForCausalLM": "looped_olmo.LoopedOlmo2ForCausalLM"},
-            "architectures": ["LoopedOlmo2ForCausalLM"],
-        }
-    else:
-        print("model not found")
-        exit()
+def get_olmo_huginn_config(
+    olmo_config_name: str,
+    huginn_recurrent_base: str,
+    *,
+    prelude: int,
+    core: int,
+    coda: int,
+) -> AutoConfig:
+    """
+    Construct a Huginn-style OLMo configuration ("raven_config") by cloning a base
+    Huginn config and updating it with hyperparameters from a source OLMo config.
 
-    config.__dict__.update(config_args)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        config=config,
-        attn_implementation="sdpa",
-        torch_dtype="bfloat16",
-        trust_remote_code=True,
-    )
-    model.rec_post_init(extra_args, {})
-    return model
+    Args:
+        olmo_config_name: Hugging Face identifier or path for the source OLMo config.
+        huginn_recurrent_base: Hugging Face identifier or path for the base
+            Huginn/Recurrent OLMo config to clone.
+        prelude: Number of prelude layers.
+        core: Number of layers in the recurrent block.
+        coda: Number of coda layers.
 
-
-def force_attn_impl(name):
-    if name == "math":
-        torch.backends.cuda.enable_flash_sdp(False)
-        torch.backends.cuda.enable_math_sdp(True)
-    elif name == "flash":
-        torch.backends.cuda.enable_flash_sdp(True)
-        torch.backends.cuda.enable_math_sdp(False)
-    else:
-        print("attn impl not found")
-        exit()
-    torch.backends.cuda.enable_mem_efficient_sdp(False)
-    torch.backends.cuda.enable_cudnn_sdp(False)
-
-
-def get_llama_huginn_config(llama_config_name):
-    config = AutoConfig.from_pretrained("models/huginn-0125-with-qk-norm-olmo2", trust_remote_code=True)
-    llama_config = AutoConfig.from_pretrained(llama_config_name, trust_remote_code=True)
-    # print(config)
-    if llama_config.tie_word_embeddings:
-        print('llama model has tied embeddings but this models won\'t have ("tie_embeddings": False), check you mean this')
-        # exit()
+    Returns:
+        `AutoConfig` for the Huginn-style recurrent OLMo model (the `raven_config`).
+    """
+    raven_config = AutoConfig.from_pretrained(huginn_recurrent_base, trust_remote_code=True)
+    olmo_config = AutoConfig.from_pretrained(olmo_config_name, trust_remote_code=True)
+    
+    if olmo_config.tie_word_embeddings:
+        print('olmo model has tied embeddings but this models won\'t have ("tie_embeddings": False), check you mean this')
+        
     update_dict = {
-        "head_dim": int(llama_config.hidden_size / llama_config.num_attention_heads),
-        "intermediate_size": llama_config.intermediate_size,
-        "n_embd": llama_config.hidden_size,
-        "n_heads": llama_config.num_attention_heads,
-        "num_key_value_heads": llama_config.num_key_value_heads,  # 8,#32,
-        "n_layers": 16,
-        "n_layers_in_coda": 5,
-        "n_layers_in_prelude": 7,
-        "n_layers_in_recurrent_block": 4,
-        "norm_eps": llama_config.rms_norm_eps,
-        "vocab_size": llama_config.vocab_size,
-        "padded_vocab_size": llama_config.vocab_size,
-        "rope_base": 500000.0,
+        "head_dim": int(olmo_config.hidden_size / olmo_config.num_attention_heads),
+        "intermediate_size": olmo_config.intermediate_size,
+        "n_embd": olmo_config.hidden_size,
+        "n_heads": olmo_config.num_attention_heads,
+        "num_key_value_heads": olmo_config.num_key_value_heads,
+        "n_layers": prelude + core + coda,
+        "n_layers_in_coda": coda,
+        "n_layers_in_prelude": prelude,
+        "n_layers_in_recurrent_block": core,
+        "norm_eps": olmo_config.rms_norm_eps,
+        "vocab_size": olmo_config.vocab_size,
+        "padded_vocab_size": olmo_config.vocab_size,
+        "rope_base": olmo_config.rope_theta,
         "tie_embeddings": False,
-        "torch_dtype": llama_config.torch_dtype,
+        "torch_dtype": olmo_config.torch_dtype,
         "qk_bias": False,
-        "max_position_embeddings": llama_config.max_position_embeddings,
+        "max_position_embeddings": olmo_config.max_position_embeddings,
     }
 
     for key, value in update_dict.items():
-        setattr(config, key, value)
+        setattr(raven_config, key, value)
 
-    config.init_values["embed_scale"] = 1.0
-    if llama_config.rope_theta:
-        config.rope_theta = llama_config.rope_theta
+    # From scratch Huginn scales embedding weights.
+    # Force no extra embedding scaling in the converted model
+    raven_config.init_values["embed_scale"] = 1.0
 
-    # print(config)
-    return config
-
-
-def get_looped_llama(model_name, looped_args):
-    model = get_edited_model(model_name, looped_args)
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    return model, tokenizer
+    return raven_config
 
 
-def weight_mapping(llama_state_dict, huginn_state_dict, mapping_cfg):
+def weight_mapping(olmo_state_dict, huginn_state_dict, mapping_cfg):
     # 0. transfer token embeddings & lm head (shape-compatible)
-    huginn_state_dict["transformer.wte.weight"] = llama_state_dict["model.embed_tokens.weight"]
-    huginn_state_dict["lm_head.weight"] = llama_state_dict["lm_head.weight"]
-    huginn_state_dict["transformer.ln_f.weight"] = llama_state_dict["model.norm.weight"]
+    huginn_state_dict["transformer.wte.weight"] = olmo_state_dict["model.embed_tokens.weight"]
+    huginn_state_dict["lm_head.weight"] = olmo_state_dict["lm_head.weight"]
+    huginn_state_dict["transformer.ln_f.weight"] = olmo_state_dict["model.norm.weight"]
 
     # Initialize adapter to [0 | I] so it passes through the prelude output
     # and ignores the random initial state: adapter(cat([x, prelude_out])) = prelude_out
@@ -110,33 +86,34 @@ def weight_mapping(llama_state_dict, huginn_state_dict, mapping_cfg):
         helper to copy a single layer
         """
         # attn
-        q_w = llama_state_dict[f"model.layers.{src_i}.self_attn.q_proj.weight"]
-        k_w = llama_state_dict[f"model.layers.{src_i}.self_attn.k_proj.weight"]
-        v_w = llama_state_dict[f"model.layers.{src_i}.self_attn.v_proj.weight"]
+        q_w = olmo_state_dict[f"model.layers.{src_i}.self_attn.q_proj.weight"]
+        k_w = olmo_state_dict[f"model.layers.{src_i}.self_attn.k_proj.weight"]
+        v_w = olmo_state_dict[f"model.layers.{src_i}.self_attn.v_proj.weight"]
 
         # cat along out-features → (n_embd + 2*n_kv*hdim, n_embd)
         huginn_state_dict[f"{tgt_prefix}.attn.Wqkv.weight"] = torch.cat([q_w, k_w, v_w], dim=0)
-        huginn_state_dict[f"{tgt_prefix}.attn.proj.weight"] = llama_state_dict[f"model.layers.{src_i}.self_attn.o_proj.weight"]
+        huginn_state_dict[f"{tgt_prefix}.attn.proj.weight"] = olmo_state_dict[f"model.layers.{src_i}.self_attn.o_proj.weight"]
 
         # MLP
-        gate_proj = llama_state_dict[f"model.layers.{src_i}.mlp.gate_proj.weight"]
-        up_proj = llama_state_dict[f"model.layers.{src_i}.mlp.up_proj.weight"]
+        gate_proj = olmo_state_dict[f"model.layers.{src_i}.mlp.gate_proj.weight"]
+        up_proj = olmo_state_dict[f"model.layers.{src_i}.mlp.up_proj.weight"]
         huginn_state_dict[f"{tgt_prefix}.mlp.fc.weight"] = torch.cat([gate_proj, up_proj], dim=0)
-        huginn_state_dict[f"{tgt_prefix}.mlp.proj.weight"] = llama_state_dict[f"model.layers.{src_i}.mlp.down_proj.weight"]
+        huginn_state_dict[f"{tgt_prefix}.mlp.proj.weight"] = olmo_state_dict[f"model.layers.{src_i}.mlp.down_proj.weight"]
 
-        if f"model.layers.{src_i}.self_attn.q_norm.weight" in llama_state_dict:
-            huginn_state_dict[f"{tgt_prefix}.attn.q_norm.weight"] = llama_state_dict[
+        if f"model.layers.{src_i}.self_attn.q_norm.weight" in olmo_state_dict:
+            huginn_state_dict[f"{tgt_prefix}.attn.q_norm.weight"] = olmo_state_dict[
                 f"model.layers.{src_i}.self_attn.q_norm.weight"
             ]
-            huginn_state_dict[f"{tgt_prefix}.attn.k_norm.weight"] = llama_state_dict[
+            huginn_state_dict[f"{tgt_prefix}.attn.k_norm.weight"] = olmo_state_dict[
                 f"model.layers.{src_i}.self_attn.k_norm.weight"
             ]
 
         # LayerNorms
-        huginn_state_dict[f"{tgt_prefix}.norm_1.weight"] = llama_state_dict[
+        # OLMo-2 uses post-norm, this is implemented in raven_modeling_minimal_olmo.py
+        huginn_state_dict[f"{tgt_prefix}.norm_1.weight"] = olmo_state_dict[
             f"model.layers.{src_i}.post_attention_layernorm.weight"
         ]
-        huginn_state_dict[f"{tgt_prefix}.norm_2.weight"] = llama_state_dict[
+        huginn_state_dict[f"{tgt_prefix}.norm_2.weight"] = olmo_state_dict[
             f"model.layers.{src_i}.post_feedforward_layernorm.weight"
         ]
 
@@ -153,103 +130,229 @@ def weight_mapping(llama_state_dict, huginn_state_dict, mapping_cfg):
     return huginn_state_dict
 
 
-def get_llama_huginn(looped_llama_model, config_model_name, save_name, mapping_cfg):
+def get_olmo_huginn(
+    looped_olmo_model: torch.nn.Module,
+    olmo_config_name: str,
+    save_name: str | None,
+    mapping_cfg: dict[str, list[int]],
+    huginn_recurrent_base: str,
+    *,
+    prelude: int,
+    core: int,
+    coda: int,
+) -> AutoModelForCausalLM:
+    """
+    Build a Huginn-style recurrent OLMo model from a looped OLMo checkpoint and optionally cache it on disk.
+
+    Args:
+        looped_olmo_model: Looped OLMo model whose weights will be remapped into the Huginn architecture.
+        olmo_config_name: Hugging Face identifier or path for the *original*
+            (non-recurrent) OLMo config to mirror.
+        save_name: Optional path under which to load/save the converted Huginn model.
+        mapping_cfg: Layer index mapping configuration for prelude/core/coda segments.
+        huginn_recurrent_base: Hugging Face identifier or path for the base
+            Huginn/Recurrent OLMo config to clone.
+        prelude: Number of prelude layers.
+        core: Number of layers in the recurrent block.
+        coda: Number of coda layers.
+
+    Returns:
+        The instantiated Huginn-style `AutoModelForCausalLM` with remapped weights.
+    """
     if save_name is not None:
+        # Return cached (already converted) model if it exists
         if os.path.exists(save_name):
             return AutoModelForCausalLM.from_pretrained(save_name, trust_remote_code=True, torch_dtype=torch.bfloat16)
 
-    config = get_llama_huginn_config(config_model_name)
-    model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
+    # Get Raven config and overwrite with OLMo hyperparameters
+    raven_olmo_config = get_olmo_huginn_config(
+        olmo_config_name,
+        huginn_recurrent_base,
+        prelude=prelude,
+        core=core,
+        coda=coda,
+    )
+    model = AutoModelForCausalLM.from_config(raven_olmo_config, trust_remote_code=True)
 
     huginn_state_dict = weight_mapping(
-        llama_state_dict=looped_llama_model.state_dict(), huginn_state_dict=model.state_dict(), mapping_cfg=mapping_cfg
+        olmo_state_dict=looped_olmo_model.state_dict(), huginn_state_dict=model.state_dict(), mapping_cfg=mapping_cfg
     )
     model.load_state_dict(huginn_state_dict)
     if save_name is not None:
         model.save_pretrained(save_name)
+        # Remove tie_word_embeddings from saved config.json to avoid conflict
+        # with RavenConfig.__init__ which passes it explicitly via tie_embeddings
+        config_path = os.path.join(save_name, "config.json")
+        with open(config_path) as f:
+            cfg = json.load(f)
+        cfg.pop("tie_word_embeddings", None)
+        with open(config_path, "w") as f:
+            json.dump(cfg, f, indent=2)
     return model
 
 
-def check_same(looped_llama, llama_huginn, llama_tokenizer):
+def check_same(
+    looped_olmo: torch.nn.Module,
+    olmo_huginn: AutoModelForCausalLM,
+    olmo_tokenizer: PreTrainedTokenizerBase,
+) -> None:
+    """
+    Compare a looped OLMo model against its Huginn-style recurrent counterpart
+    by running them on the same input and printing diagnostic statistics.
+
+    Args:
+        looped_olmo: The looped OLMo model to use as the reference.
+        olmo_huginn: The Huginn-style recurrent OLMo model to compare against.
+        olmo_tokenizer: Tokenizer used to encode the test input string.
+    """
     input_text = "The quick brown fox jumps over the lazy dog."
-    inputs = llama_tokenizer(input_text, return_tensors="pt").to(llama_huginn.device)
+    inputs = olmo_tokenizer(input_text, return_tensors="pt").to(olmo_huginn.device)
     looped_inputs = {k: v.clone() for k, v in inputs.items()}
     huginn_inputs = {k: v.clone() for k, v in inputs.items()}
 
     with torch.no_grad():
-        # try:
-        llama_out = looped_llama(**looped_inputs, output_hidden_states=True)
-        logits_looped = llama_out.logits
-        # except:
-        huginn_out = llama_huginn(
+        logits_looped = looped_olmo(**looped_inputs).logits
+
+        huginn_out = olmo_huginn(
             **huginn_inputs,
-            output_details={"return_logits": True, "return_latents": True, "return_head": True, "return_stats": False},
+            output_details={"return_logits": True, "return_latents": False, "return_head": False, "return_stats": False},
             num_steps=1,
         )
         logits_huginn = huginn_out.logits
 
     # Compare logits
     same_shape = logits_looped.shape == logits_huginn.shape
-    print(f"looped llama dtype: {looped_llama.dtype}")
-    print(f"logits looped: {logits_looped.dtype}")
-    print(f"llama hidden states {len(llama_out.hidden_states)}")
-    print(f"llama hidden states {llama_out.hidden_states[0].shape}")
-    print(f"huginn llama dtype: {llama_huginn.dtype}")
-    print(f"huginn logits {logits_huginn.dtype}")
-    print(f"huginn hidden states {len(huginn_out.hidden_states)}")
-    print(f"huginn hidden states {huginn_out.hidden_states[0].shape}")
-    print(f"huginn hidden states {len(huginn_out.latent_states)}")
-    print(f"huginn hidden states {huginn_out.latent_states.shape}")
-    close_values = torch.allclose(logits_looped, logits_huginn, atol=1e-4, rtol=1e-4)
-    mse = torch.nn.functional.mse_loss(logits_looped, logits_huginn).item()
-
-    print(f"Same shape: {same_shape}")
-    print(f"Values close: {close_values}")
-    print(f"Mean Squared Error: {mse:.6f}")
-
-    for idx, (hug_layer, llama_layer) in enumerate(zip(huginn_out.hidden_states, llama_out.hidden_states)):
-        close_values = torch.allclose(hug_layer, llama_layer, atol=1e-4, rtol=1e-4)
-        mse = torch.nn.functional.mse_loss(hug_layer, llama_layer).item()
-        print(f"{idx}: {close_values}, {mse:.3f}")
+    print(f"Same logits shape: {same_shape}")
+    print(f"Logits dtypes: looped={logits_looped.dtype}, huginn={logits_huginn.dtype}")
+    logits_close = torch.allclose(logits_looped, logits_huginn, atol=1e-4, rtol=1e-4)
+    logits_mse = torch.nn.functional.mse_loss(logits_looped, logits_huginn).item()
+    print(f"Logits allclose: {logits_close}")
+    print(f"Logits MSE: {logits_mse:.6f}")
 
 
-def main():
+def convert(
+    model_name: str = "allenai/OLMo-2-0425-1B",
+    save_root: str = "models",
+    prelude: int = 7,
+    core: int = 4,
+    coda: int = 5,
+    start_index: int = 7,
+    huginn_recurrent_base: str = "smcleish/Recurrent-OLMo-2-0425-untrained",
+) -> None:
     """
-    Places to edit:
-    1. Make a copy of `models/huginn-0125` called `models/huginn-0125-with-qk-norm-olmo2` and replace the modelling file contents with the contents of `convert_pretrained_model/raven_modeling_minimal_with_qk_norm.py`
-    2. `llama_model_name` and `save_name` to be the path to the feedforward model and the save path
-    3. looped_args is passed to the feedforward model
-    4. mapping_cfg is passed to take layers from the feedforward model to form the Raven model
-    5. edit `update_dict` in `get_llama_huginn_config` to match the config input into looped_args and mapping_cfg
+    Convert a pretrained OLMo-2 model into a recurrent Huginn-style model and run a sanity check.
     """
 
-    force_attn_impl("math")
+    # Treat save_root as a root output folder and construct a subdirectory name
+    # based on the source model name and the prelude/core/coda split.
+    model_base = os.path.basename(model_name.rstrip("/"))
+    subdir_name = f"{model_base}_pre{prelude}_core{core}_coda{coda}"
+    save_name = str(Path(save_root) / subdir_name)
 
-    llama_model_name = "models/OLMo-2-0425-1B-step1907359"
-    save_name = "models/recurrent_olmo_2_0425_1b_step1907359_4_6_4"
     looped_args = {
-        "prelude_size": 7,
-        "start_index": 7,
-        "block_size": 4,
-        "coda_size": 5,
+        "prelude_size": prelude,
+        "start_index": start_index,
+        "block_size": core,
+        "coda_size": coda,
         "num_rec": 1,
     }
     mapping_cfg = {
-        "prelude_idx": [0, 1, 2, 3, 4, 5, 6],
-        "core_idx": [7, 8, 9, 10],
-        "coda_idx": [11, 12, 13, 14, 15],
+        "prelude_idx": list(range(prelude)),
+        "core_idx": list(range(start_index, start_index + core)),
+        "coda_idx": list(range(start_index + core, start_index + core + coda)),
     }
 
-    looped_llama_model, llama_tokenizer = get_looped_llama(llama_model_name, looped_args)
+    # Get vanilla looped OLMo-2 model for sanity-checking activations against Huginn OLMo
+    # This is also used as an intermediate model to create the Huginn OLMo model
+    looped_olmo_model, olmo_tokenizer = get_looped_model(model_name, looped_args)
 
-    llama_huginn = get_llama_huginn(looped_llama_model, llama_model_name, save_name, mapping_cfg)
-    total_params = sum(p.numel() for p in llama_huginn.parameters())
+    # Create the Huginn OLMo model
+    olmo_huginn = get_olmo_huginn(
+        looped_olmo_model,
+        model_name,
+        save_name,
+        mapping_cfg,
+        huginn_recurrent_base,
+        prelude=prelude,
+        core=core,
+        coda=coda,
+    )
+    total_params = sum(p.numel() for p in olmo_huginn.parameters())
+    print(f"Total params: {total_params:,}")
 
+    # Check that the Huginn OLMo model matches the vanilla looped OLMo-2 model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    looped_llama_model.eval().to(device=device, dtype=torch.float32)
-    llama_huginn.eval().to(device=device, dtype=torch.float32)
+    looped_olmo_model.eval().to(device=device, dtype=torch.float32)
+    olmo_huginn.eval().to(device=device, dtype=torch.float32)
 
-    check_same(looped_llama_model, llama_huginn, llama_tokenizer)
+    check_same(looped_olmo_model, olmo_huginn, olmo_tokenizer)
+
+
+def main() -> None:
+    """
+    CLI entrypoint to convert a OLMo-2 model into a recurrent Huginn-style
+    model using a prelude / recurrent core / coda decomposition.
+    """
+
+    parser = argparse.ArgumentParser(description="Convert a OLMo-2 model into a recurrent Huginn-style model.")
+    parser.add_argument(
+        "--source",
+        "--model-name",
+        dest="model_name",
+        default="allenai/OLMo-2-0425-1B",
+        help="Path or HF id of the source OLMo-2 model.",
+    )
+    parser.add_argument(
+        "--save-name",
+        "--output",
+        dest="save_name",
+        default="models",
+        help="Output folder to store the converted recurrent model subdirectory.",
+    )
+    parser.add_argument(
+        "--prelude",
+        type=int,
+        default=7,
+        help="Number of prelude layers.",
+    )
+    parser.add_argument(
+        "--core",
+        type=int,
+        default=4,
+        help="Number of layers in the recurrent block.",
+    )
+    parser.add_argument(
+        "--coda",
+        type=int,
+        default=5,
+        help="Number of coda layers.",
+    )
+    parser.add_argument(
+        "--start-index",
+        type=int,
+        default=7,
+        help="Index of the first layer in the recurrent block.",
+    )
+    parser.add_argument(
+        "--huginn-recurrent-base",
+        type=str,
+        default="smcleish/Recurrent-OLMo-2-0425-untrained",
+        help=(
+            "Hugging Face id or local path for the base Huginn/Recurrent OLMo config "
+            "to clone before copying OLMo weights."
+        ),
+    )
+    args = parser.parse_args()
+
+    convert(
+        model_name=args.model_name,
+        save_root=args.save_name,
+        prelude=args.prelude,
+        core=args.core,
+        coda=args.coda,
+        start_index=args.start_index,
+        huginn_recurrent_base=args.huginn_recurrent_base,
+    )
 
 
 if __name__ == "__main__":

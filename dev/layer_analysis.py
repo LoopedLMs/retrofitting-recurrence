@@ -21,13 +21,13 @@ Usage:
     uv run python dev/layer_analysis.py --model_name TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T --use_builtin_prompts true
 """
 
+import argparse
 import math
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
-from jsonargparse import CLI
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -464,5 +464,83 @@ def layer_analysis(
     plot_metrics(block_influence, angular_distance, config, model_name, save_plot)
 
 
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for layer analysis."""
+    parser = argparse.ArgumentParser(
+        description="Analyze layer redundancy and functional zones for a pretrained HF model.",
+    )
+    parser.add_argument(
+        "--model_name",
+        type=str,
+        default="allenai/OLMo-2-0425-1B",
+        help="HuggingFace model name or local path.",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        choices=["auto", "cuda", "cpu"],
+        default="auto",
+        help="Device to run on.",
+    )
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        choices=["bfloat16", "float16", "float32"],
+        default="bfloat16",
+        help="Model dtype.",
+    )
+    parser.add_argument(
+        "--max_tokens",
+        type=int,
+        default=4096,
+        help="Max tokens per calibration prompt.",
+    )
+    parser.add_argument(
+        "--num_samples",
+        type=int,
+        default=10000,
+        help="Number of C4 validation samples for calibration.",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=8,
+        help="Batch size for model forward passes.",
+    )
+    parser.add_argument(
+        "--use_builtin_prompts",
+        action="store_true",
+        help="Skip dataset download and use hardcoded prompts instead.",
+    )
+    parser.add_argument(
+        "--target_recurrent_size",
+        type=int,
+        default=4,
+        help="Force recurrent block to this many layers.",
+    )
+    parser.add_argument(
+        "--save_plot",
+        type=str,
+        default=None,
+        help="Path to save the analysis plot. Defaults to dev/{model_short_name}_layers.png.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    layer_analysis(
+        model_name=args.model_name,
+        device=args.device,
+        dtype=args.dtype,
+        max_tokens=args.max_tokens,
+        num_samples=args.num_samples,
+        batch_size=args.batch_size,
+        use_builtin_prompts=args.use_builtin_prompts,
+        target_recurrent_size=args.target_recurrent_size,
+        save_plot=args.save_plot,
+    )
+
+
 if __name__ == "__main__":
-    CLI(layer_analysis)
+    main()

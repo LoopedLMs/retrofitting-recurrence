@@ -1,51 +1,9 @@
 import os
 
 import torch
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM
 
-
-def get_edited_model(model_name, extra_args={}):
-    config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
-    if "llama" in model_name.lower():
-        config_args = {
-            "model_type": "looped_llama2",
-            "auto_map": {"AutoModelForCausalLM": "looped_llama.LoopedLlamaForCausalLM"},
-            "architectures": ["LoopedLlamaForCausalLM"],
-        }
-    elif "olmo-2" in model_name.lower():
-        config_args = {
-            "model_type": "looped_olmo2",
-            "auto_map": {"AutoModelForCausalLM": "looped_olmo.LoopedOlmo2ForCausalLM"},
-            "architectures": ["LoopedOlmo2ForCausalLM"],
-        }
-    else:
-        print("model not found")
-        exit()
-
-    config.__dict__.update(config_args)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        config=config,
-        attn_implementation="sdpa",
-        torch_dtype="bfloat16",
-        trust_remote_code=True,
-    )
-    model.rec_post_init(extra_args, {})
-    return model
-
-
-def force_attn_impl(name):
-    if name == "math":
-        torch.backends.cuda.enable_flash_sdp(False)
-        torch.backends.cuda.enable_math_sdp(True)
-    elif name == "flash":
-        torch.backends.cuda.enable_flash_sdp(True)
-        torch.backends.cuda.enable_math_sdp(False)
-    else:
-        print("attn impl not found")
-        exit()
-    torch.backends.cuda.enable_mem_efficient_sdp(False)
-    torch.backends.cuda.enable_cudnn_sdp(False)
+from convert_pretrained_model.common import force_attn_impl, get_looped_model
 
 
 def get_llama_huginn_config(llama_config_name):
@@ -92,12 +50,6 @@ def get_llama_huginn_config(llama_config_name):
 
     # print(config)
     return config
-
-
-def get_looped_llama(model_name, looped_args):
-    model = get_edited_model(model_name, looped_args)
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    return model, tokenizer
 
 
 def weight_mapping(llama_state_dict, huginn_state_dict, mapping_cfg):
@@ -229,7 +181,7 @@ def main():
         "coda_idx": [18, 19, 20, 21],
     }
 
-    looped_llama_model, llama_tokenizer = get_looped_llama(llama_model_name, looped_args)
+    looped_llama_model, llama_tokenizer = get_looped_model(llama_model_name, looped_args)
     # looped_llama_model = None
     llama_huginn = get_llama_huginn(looped_llama_model, llama_model_name, save_name, mapping_cfg)
     total_params = sum(p.numel() for p in llama_huginn.parameters())

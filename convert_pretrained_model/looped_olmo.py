@@ -1,3 +1,10 @@
+"""
+Looped OLMo2 model variants used to retrofit recurrence into a pretrained OLMo2
+causal LM. Defines a configurable loop schedule (prelude / recurrent block /
+coda), plus wrapper modules that reuse transformer layers across multiple passes
+while keeping Hugging Face-compatible interfaces.
+"""
+
 import torch
 from torch import nn
 from transformers.cache_utils import Cache, DynamicCache

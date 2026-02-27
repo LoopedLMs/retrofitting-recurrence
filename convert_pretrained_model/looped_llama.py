@@ -1,3 +1,10 @@
+"""
+Looped LLaMA model variants used to retrofit recurrence into a pretrained LLaMA
+causal LM. Defines a configurable loop schedule (prelude / recurrent block /
+coda) and wrapper modules that reuse transformer layers across multiple passes
+while keeping Hugging Face-compatible interfaces.
+"""
+
 import torch
 from torch import nn
 from transformers.activations import ACT2FN
