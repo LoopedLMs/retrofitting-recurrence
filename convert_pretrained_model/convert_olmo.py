@@ -1,17 +1,17 @@
 import argparse
-import json
 import os
 from pathlib import Path
 
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerBase
 
-from convert_pretrained_model.common import force_attn_impl, get_looped_model
+from convert_pretrained_model.raven_modeling_minimal_olmo import RavenForCausalLM
+from convert_pretrained_model.common import get_looped_model
+from convert_pretrained_model.raven_config_minimal import RavenConfig
 
 
 def get_olmo_huginn_config(
     olmo_config_name: str,
-    huginn_recurrent_base: str,
     *,
     prelude: int,
     core: int,
@@ -23,8 +23,6 @@ def get_olmo_huginn_config(
 
     Args:
         olmo_config_name: Hugging Face identifier or path for the source OLMo config.
-        huginn_recurrent_base: Hugging Face identifier or path for the base
-            Huginn/Recurrent OLMo config to clone.
         prelude: Number of prelude layers.
         core: Number of layers in the recurrent block.
         coda: Number of coda layers.
@@ -32,12 +30,12 @@ def get_olmo_huginn_config(
     Returns:
         `AutoConfig` for the Huginn-style recurrent OLMo model (the `raven_config`).
     """
-    raven_config = AutoConfig.from_pretrained(huginn_recurrent_base, trust_remote_code=True)
+    raven_config = RavenConfig()
     olmo_config = AutoConfig.from_pretrained(olmo_config_name, trust_remote_code=True)
-    
+
     if olmo_config.tie_word_embeddings:
         print('olmo model has tied embeddings but this models won\'t have ("tie_embeddings": False), check you mean this')
-        
+
     update_dict = {
         "head_dim": int(olmo_config.hidden_size / olmo_config.num_attention_heads),
         "intermediate_size": olmo_config.intermediate_size,
@@ -64,6 +62,7 @@ def get_olmo_huginn_config(
     # From scratch Huginn scales embedding weights.
     # Force no extra embedding scaling in the converted model
     raven_config.init_values["embed_scale"] = 1.0
+    raven_config.rope_theta = olmo_config.rope_theta
 
     return raven_config
 
@@ -135,7 +134,6 @@ def get_olmo_huginn(
     olmo_config_name: str,
     save_name: str | None,
     mapping_cfg: dict[str, list[int]],
-    huginn_recurrent_base: str,
     *,
     prelude: int,
     core: int,
@@ -150,8 +148,6 @@ def get_olmo_huginn(
             (non-recurrent) OLMo config to mirror.
         save_name: Optional path under which to load/save the converted Huginn model.
         mapping_cfg: Layer index mapping configuration for prelude/core/coda segments.
-        huginn_recurrent_base: Hugging Face identifier or path for the base
-            Huginn/Recurrent OLMo config to clone.
         prelude: Number of prelude layers.
         core: Number of layers in the recurrent block.
         coda: Number of coda layers.
@@ -167,12 +163,11 @@ def get_olmo_huginn(
     # Get Raven config and overwrite with OLMo hyperparameters
     raven_olmo_config = get_olmo_huginn_config(
         olmo_config_name,
-        huginn_recurrent_base,
         prelude=prelude,
         core=core,
         coda=coda,
     )
-    model = AutoModelForCausalLM.from_config(raven_olmo_config, trust_remote_code=True)
+    model = RavenForCausalLM(raven_olmo_config)
 
     huginn_state_dict = weight_mapping(
         olmo_state_dict=looped_olmo_model.state_dict(), huginn_state_dict=model.state_dict(), mapping_cfg=mapping_cfg
@@ -180,14 +175,6 @@ def get_olmo_huginn(
     model.load_state_dict(huginn_state_dict)
     if save_name is not None:
         model.save_pretrained(save_name)
-        # Remove tie_word_embeddings from saved config.json to avoid conflict
-        # with RavenConfig.__init__ which passes it explicitly via tie_embeddings
-        config_path = os.path.join(save_name, "config.json")
-        with open(config_path) as f:
-            cfg = json.load(f)
-        cfg.pop("tie_word_embeddings", None)
-        with open(config_path, "w") as f:
-            json.dump(cfg, f, indent=2)
     return model
 
 
@@ -237,7 +224,6 @@ def convert(
     core: int = 4,
     coda: int = 5,
     start_index: int = 7,
-    huginn_recurrent_base: str = "smcleish/Recurrent-OLMo-2-0425-untrained",
 ) -> None:
     """
     Convert a pretrained OLMo-2 model into a recurrent Huginn-style model and run a sanity check.
@@ -272,7 +258,6 @@ def convert(
         model_name,
         save_name,
         mapping_cfg,
-        huginn_recurrent_base,
         prelude=prelude,
         core=core,
         coda=coda,
@@ -333,15 +318,6 @@ def main() -> None:
         default=7,
         help="Index of the first layer in the recurrent block.",
     )
-    parser.add_argument(
-        "--huginn-recurrent-base",
-        type=str,
-        default="smcleish/Recurrent-OLMo-2-0425-untrained",
-        help=(
-            "Hugging Face id or local path for the base Huginn/Recurrent OLMo config "
-            "to clone before copying OLMo weights."
-        ),
-    )
     args = parser.parse_args()
 
     convert(
@@ -351,7 +327,6 @@ def main() -> None:
         core=args.core,
         coda=args.coda,
         start_index=args.start_index,
-        huginn_recurrent_base=args.huginn_recurrent_base,
     )
 
 

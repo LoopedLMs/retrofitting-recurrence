@@ -14,8 +14,8 @@ validate_config || exit 1
 python train.py \
     --epochs=1 \
     --max_length=1024 \
-    --out_path=olmo_adapter_only_gsm8k \
-    --run_name="olmo_adapter_only_gsm8k" \
+    --out_path=outputs \
+    --run_name="olmo_adapter_only" \
     --optim_config.lr=1e-3 \
     --optim_config.weight_decay=1e-4 \
     --model_name="models/OLMo-2-0425-1B_pre7_core4_coda5" \
