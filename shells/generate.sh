@@ -1,7 +1,7 @@
 cd "$(dirname "$0")/.."
 uv sync
 source .venv/bin/activate
-source shells/machine_config.sh
+source shells/_machine_config.sh
 validate_config || exit 1
 
 MODEL_NAME="smcleish/Recurrent-Llama-3.2-train-recurrence-4"

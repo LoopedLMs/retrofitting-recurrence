@@ -48,6 +48,8 @@ class CLISettings:
     run_name: str = "default-run"
     out_path: str = "huginn_llama"
     resume_path: str | None = None
+    tokenizer_name: str | None = None
+    streaming: bool = True
     save_n_mins_before_timeout: int | None = None
     # data
     preprocessed_data_path: str | None = None
@@ -83,7 +85,7 @@ class CLISettings:
     parquet_dataset_max_tokens: int | None = None
     ignore_past_scheduler: bool = False
     mean_recurrence_schedule: dict[float, Any] = field(
-        default_factory=lambda: dict(turn_on=False, warmup=0.1, max_mean_rec=32, warmup_type="linear")
+        default_factory=lambda: dict(turn_on=False, warmup=0.1, max_mean_rec=32, warmup_type="linear", start=1)
     )
     mean_backprop_depth_schedule: dict[float, Any] = field(
         default_factory=lambda: dict(turn_on=False, warmup=0.1, max_backprop=8, start=1)
@@ -367,7 +369,8 @@ def startup(cfg: CLISettings):
             config=config,
         )
 
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
+    tokenizer_source = cfg.tokenizer_name or cfg.model_name
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_source)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -595,32 +598,47 @@ def startup(cfg: CLISettings):
     if cfg.preprocessed_data_path is None:
         cfg.token_id_col_name = "token_ids"
         dataset_save_dir = f"{cfg.out_path}/{cfg.run_name}/dataset"
-        if is_main_process():  # only load to rank 0 to begin
-            try:
-                dataset: Dataset = load_dataset(cfg.dataset_location, cfg.dataset_config)["train"]  # type: ignore
-            except:
-                dataset: Dataset = load_from_disk(cfg.dataset_location, cfg.dataset_config)  # type: ignore
-
+        if cfg.streaming:
+            # Streaming mode: load directly from HF hub without downloading full dataset.
+            if distributed:
+                raise ValueError("streaming=True is currently only supported for non-distributed runs.")
+            dataset = load_dataset(cfg.dataset_location, cfg.dataset_config, streaming=True)["train"]  # type: ignore
             if cfg.max_samples is not None:
-                dataset = dataset.select(range(cfg.max_samples))
-
-            if os.path.exists(dataset_save_dir):  # delete any old dataset
-                shutil.rmtree(dataset_save_dir)
+                dataset = dataset.take(cfg.max_samples)
 
             tokenized_dataset = dataset.map(
                 format_and_tokenize_examples,
-                num_proc=16,
                 remove_columns=dataset.column_names,
                 batched=True,
                 batch_size=1024,
             )
+        else:
+            if is_main_process():  # only load to rank 0 to begin
+                try:
+                    dataset: Dataset = load_dataset(cfg.dataset_location, cfg.dataset_config)["train"]  # type: ignore
+                except Exception:
+                    dataset: Dataset = load_from_disk(cfg.dataset_location, cfg.dataset_config)  # type: ignore
 
-        if distributed:  # load the dataset to other ranks
-            if is_main_process():
-                tokenized_dataset.save_to_disk(dataset_save_dir)
-            torch.distributed.barrier()
-            tokenized_dataset = load_from_disk(dataset_save_dir)
-            torch.distributed.barrier()
+                if cfg.max_samples is not None:
+                    dataset = dataset.select(range(cfg.max_samples))
+
+                if os.path.exists(dataset_save_dir):  # delete any old dataset
+                    shutil.rmtree(dataset_save_dir)
+
+                tokenized_dataset = dataset.map(
+                    format_and_tokenize_examples,
+                    num_proc=16,
+                    remove_columns=dataset.column_names,
+                    batched=True,
+                    batch_size=1024,
+                )
+
+            if distributed:  # load the dataset to other ranks
+                if is_main_process():
+                    tokenized_dataset.save_to_disk(dataset_save_dir)
+                torch.distributed.barrier()
+                tokenized_dataset = load_from_disk(dataset_save_dir)
+                torch.distributed.barrier()
     else:
         cfg.token_id_col_name = "input_ids"
         if cfg.is_parquet_dataset:
@@ -638,12 +656,24 @@ def startup(cfg: CLISettings):
                 dataset = dataset.select(range(cfg.max_samples))
 
     if not cfg.is_parquet_dataset:
-        tokenized_dataset.set_format("pt")
+        if cfg.streaming:
+            # IterableDataset-style formatting for streaming datasets.
+            tokenized_dataset = tokenized_dataset.with_format("torch")
+        else:
+            tokenized_dataset.set_format("pt")
 
     dataloader_generator = torch.Generator()
     dataloader_generator.manual_seed(cfg.seed)
     if cfg.is_parquet_dataset:
         dataloader = tokenized_dataset
+    elif cfg.streaming:
+        # In streaming mode we rely on the iterable HF dataset and do not shuffle here.
+        dataloader = torch.utils.data.DataLoader(
+            tokenized_dataset,  # type: ignore
+            batch_size=cfg.micro_batch_size,
+            pin_memory=True,
+            generator=dataloader_generator,
+        )
     elif distributed:
         sampler = torch.utils.data.DistributedSampler(
             tokenized_dataset,
@@ -679,6 +709,8 @@ def startup(cfg: CLISettings):
     else:
         if cfg.max_steps:
             max_training_steps = cfg.max_steps
+        elif cfg.streaming:
+            raise ValueError("When using streaming datasets, you must specify max_steps.")
         else:
             accumulation_steps = max(1, cfg.batch_size // cfg.micro_batch_size)
             num_update_steps_per_epoch = math.ceil(len(dataloader) / accumulation_steps)
@@ -745,7 +777,7 @@ def startup(cfg: CLISettings):
     cfg.world_size = world_size
     if is_main_process():
         wandb.init(
-            project=cfg.out_path,
+            project="huginn_retrofit",
             name=cfg.run_name,
             config=cfg,
             dir=cfg.out_path,
@@ -843,9 +875,15 @@ def sheduler_n_k_handler(state, cfg, model_config):
     else:
         mean_backprop_depth = model_config.mean_backprop_depth
 
-    if new_mean_rec <= 0:
-        # schedule starts at 0
-        new_mean_rec = 1
+    # Enforce a minimum mean recurrence when using the scheduler.
+    # For backwards compatibility this defaults to 1 but can be raised,
+    # e.g. start=2 to ramp from 2 → max_mean_rec instead of 1 → max_mean_rec.
+    min_mean_rec = 1
+    if cfg.mean_recurrence_schedule["turn_on"]:
+        min_mean_rec = int(cfg.mean_recurrence_schedule.get("start", 1))
+
+    if new_mean_rec < min_mean_rec:
+        new_mean_rec = min_mean_rec
 
     if (new_mean_rec - mean_backprop_depth) < 0:
         # t = max(mean_recurrence - mean_backprop_depth, 0) messes up the schedule so we catch that here

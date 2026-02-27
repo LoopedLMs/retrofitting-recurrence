@@ -1,7 +1,7 @@
 cd "$(dirname "$0")/.."
 uv sync
 source .venv/bin/activate
-source shells/machine_config.sh
+source shells/_machine_config.sh
 validate_config || exit 1
 
 #### Figure 2 -- 64 x 4 gpus
