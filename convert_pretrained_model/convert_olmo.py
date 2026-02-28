@@ -5,9 +5,9 @@ from pathlib import Path
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerBase
 
-from convert_pretrained_model.raven_modeling_minimal_olmo import RavenForCausalLM
 from convert_pretrained_model.common import get_looped_model
 from convert_pretrained_model.raven_config_minimal import RavenConfig
+from convert_pretrained_model.raven_modeling_minimal_olmo import RavenForCausalLM
 
 
 def get_olmo_huginn_config(
@@ -155,10 +155,9 @@ def get_olmo_huginn(
     Returns:
         The instantiated Huginn-style `AutoModelForCausalLM` with remapped weights.
     """
-    if save_name is not None:
-        # Return cached (already converted) model if it exists
-        if os.path.exists(save_name):
-            return AutoModelForCausalLM.from_pretrained(save_name, trust_remote_code=True, torch_dtype=torch.bfloat16)
+    # Return cached (already converted) model if it exists
+    if save_name is not None and os.path.exists(save_name):
+        return AutoModelForCausalLM.from_pretrained(save_name, trust_remote_code=True, torch_dtype=torch.bfloat16)
 
     # Get Raven config and overwrite with OLMo hyperparameters
     raven_olmo_config = get_olmo_huginn_config(
@@ -262,6 +261,8 @@ def convert(
         core=core,
         coda=coda,
     )
+    if save_name is not None and not os.path.exists(os.path.join(save_name, "tokenizer.json")):
+        olmo_tokenizer.save_pretrained(save_name)
     total_params = sum(p.numel() for p in olmo_huginn.parameters())
     print(f"Total params: {total_params:,}")
 

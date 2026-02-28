@@ -1,10 +1,11 @@
-cd "$(dirname "$0")/.."
+#!/usr/bin/env bash
+cd ~/retrofitting-recurrence
 uv sync
 source .venv/bin/activate
 source shells/_machine_config.sh
 validate_config || exit 1
 
-MODEL_NAME="smcleish/Recurrent-Llama-3.2-train-recurrence-4"
+MODEL_NAME="models/OLMo-2-0425-1B_pre7_core4_coda5"
 PROMPT="The key to solving hard math problems is"
 NUM_RECURRENCE_STEPS=4
 MAX_NEW_TOKENS=200

@@ -116,11 +116,14 @@ else
     PARTITION="$SLURM_PARTITION_GPU"
     QOS="$SLURM_QOS_GPU"
     MEM="$SLURM_MEM_GPU"
-    # Add optional GPU memory specification if configured
-    if [ -n "$SLURM_GPU_MEM" ]; then
-        GRES="--gres=gpu:$NUM_GPUS,gpumem:$SLURM_GPU_MEM"
+    # Build gres string: gpu[:<type>]:<count>[,gpumem:<mem>]
+    if [ -n "$SLURM_GPU_TYPE" ]; then
+        GRES="--gres=gpu:$SLURM_GPU_TYPE:$NUM_GPUS"
     else
         GRES="--gres=gpu:$NUM_GPUS"
+    fi
+    if [ -n "$SLURM_GPU_MEM" ]; then
+        GRES="$GRES,gpumem:$SLURM_GPU_MEM"
     fi
 fi
 
@@ -143,6 +146,9 @@ if [ -n "$PARTITION" ]; then
 fi
 if [ -n "$QOS" ]; then
     SBATCH_CMD="$SBATCH_CMD --qos=$QOS"
+fi
+if [ -n "$SLURM_ACCOUNT" ]; then
+    SBATCH_CMD="$SBATCH_CMD --account=$SLURM_ACCOUNT"
 fi
 
 # Add GPU resources for GPU jobs
@@ -193,7 +199,11 @@ echo "  Script:    $SCRIPT_PATH"
 echo "  Partition: $PARTITION"
 echo "  Memory:    $MEM"
 if [ -n "$GRES" ]; then
-    echo "  GPUs:      $NUM_GPUS"
+    if [ -n "$SLURM_GPU_TYPE" ]; then
+        echo "  GPUs:      $NUM_GPUS x $SLURM_GPU_TYPE"
+    else
+        echo "  GPUs:      $NUM_GPUS"
+    fi
     if [ -n "$SLURM_GPU_MEM" ]; then
         echo "  GPU Mem:   $SLURM_GPU_MEM (each)"
     fi

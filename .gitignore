@@ -1,5 +1,5 @@
 # Machine-specific config
-shells/machine_config.sh
+shells/_machine_config.sh
 
 # Local files
 *.core
@@ -10,7 +10,7 @@ huginn_llama/
 inductor_cache/
 models/*
 outputs*/
-slurm_logs/
+logs/
 knowledge/
 
 # Python

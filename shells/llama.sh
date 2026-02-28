@@ -1,4 +1,5 @@
-cd "$(dirname "$0")/.."
+#!/usr/bin/env bash
+cd ~/retrofitting-recurrence
 uv sync
 source .venv/bin/activate
 source shells/_machine_config.sh
