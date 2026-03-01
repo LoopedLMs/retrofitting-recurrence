@@ -105,7 +105,7 @@ JOB_NAME="ouro_rl_$(basename $SCRIPT_PATH .sh)"
 # Determine job type based on script name convention
 # CPU jobs: scripts ending with _cpu.sh
 # GPU jobs: all other scripts
-if [[ "$SCRIPT_PATH" =~ _cpu\.sh$ ]]; then
+if [[ "$SCRIPT_PATH" =~ __cpu\.sh$ ]]; then
     JOB_TYPE="cpu"
     PARTITION="$SLURM_PARTITION_CPU"
     QOS="$SLURM_QOS_CPU"

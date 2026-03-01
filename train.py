@@ -48,7 +48,6 @@ class CLISettings:
     run_name: str = "default-run"
     out_path: str = "huginn_llama"
     resume_path: str | None = None
-    tokenizer_name: str | None = None
     streaming: bool = True
     save_n_mins_before_timeout: int | None = None
     # data
@@ -113,6 +112,7 @@ class CLISettings:
     distillation: dict[str, Any] = field(
         default_factory=lambda: dict(enabled=False, teacher_model_name=None, temperature=2.0, alpha=0.5)
     )
+    initial_state_mode: str = "random"  # "random" | "skip-adapter" | "embed-init"
 
     def __post_init__(self):
         assert self.micro_batch_size <= self.batch_size, "batch size must be less than micro batch size"
@@ -340,6 +340,7 @@ def startup(cfg: CLISettings):
 
     ########## Model and tokenizer ##############
     config = AutoConfig.from_pretrained(cfg.model_name, trust_remote_code=True)
+    config.initial_state_mode = cfg.initial_state_mode
     if cfg.init_from_scratch:
         # https://huggingface.co/smcleish/Recurrent-Llama-3.2-2-4-2-untrained/blob/main/raven_modeling_minimal_with_init.py
         if cfg.non_recurrent_model:
@@ -369,8 +370,7 @@ def startup(cfg: CLISettings):
             config=config,
         )
 
-    tokenizer_source = cfg.tokenizer_name or cfg.model_name
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_source)
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -978,7 +978,8 @@ def train(
             is_accumulating = data_step % accumulation_steps != 0
 
             if cfg.fix_num_steps:
-                num_steps = torch.tensor([0, 1], device=model.device)
+                t = max(new_mean_rec - new_backprop_depth, 0)
+                num_steps = torch.tensor([t, new_backprop_depth], device=model.device)
             elif cfg.compile_warmup_routine:
                 num_steps = get_steps_compiling(data_step, model.device)
             elif not cfg.non_recurrent_model:

@@ -1,5 +1,5 @@
 import torch
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
 
 
 def get_edited_model(model_name: str, extra_args: dict | None = None):
@@ -58,5 +58,3 @@ def get_looped_model(model_name: str, looped_args: dict):
     model = get_edited_model(model_name, looped_args)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     return model, tokenizer
-
-

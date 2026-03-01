@@ -18,7 +18,7 @@ can be consumed by train.py via --is_parquet_dataset=true.
 """
 
 import torch
-from datasets import Dataset, load_from_disk
+from datasets import Dataset, DatasetDict, load_from_disk
 from jsonargparse import CLI
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from trl import pack_dataset
@@ -177,7 +177,12 @@ def process_data(
     packing_suffix = "_packed_wrapped" if wrapped_packing else ("_packed" if pack else "")
     dataset_save_dir = f"{save_path}/preprocessed_data{packing_suffix}/{tokenizer_name}/{out_path}/dataset"
 
-    dataset: Dataset = load_from_disk(dataset_location)
+    dataset = load_from_disk(dataset_location)
+    if isinstance(dataset, DatasetDict):
+        splits = list(dataset.keys())
+        assert len(splits) == 1, f"Expected a single-split DatasetDict, got splits: {splits}"
+        dataset = dataset[splits[0]]
+    assert isinstance(dataset, Dataset)
 
     if max_samples is not None:
         dataset = dataset.select(range(max_samples))

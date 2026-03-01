@@ -31,6 +31,7 @@ class RavenConfig(PretrainedConfig):
         init_orthogonal: bool = False,
         state_init: str = "like-init",
         injection_type: str = "linear",
+        initial_state_mode: str = "random",  # "random" | "skip-adapter" | "embed-init"
         n_layers_in_recurrent_block: int = 4,
         mean_recurrence: int = 32,
         sampling_scheme: str = "poisson-lognormal-filling",
@@ -63,6 +64,7 @@ class RavenConfig(PretrainedConfig):
         self.init_orthogonal = init_orthogonal
         self.state_init = state_init
         self.injection_type = injection_type
+        self.initial_state_mode = initial_state_mode
         self.n_layers_in_recurrent_block = n_layers_in_recurrent_block
         self.mean_recurrence = mean_recurrence
         self.sampling_scheme = sampling_scheme
@@ -91,7 +93,7 @@ class RavenConfig(PretrainedConfig):
             "embed_scale": sqrt(self.n_embd),
         }
 
-        kwargs.pop("tie_word_embeddings", None) # Inherited from base config and will be set twice
+        kwargs.pop("tie_word_embeddings", None)  # Inherited from base config and will be set twice
         super().__init__(
             # pad_token_id=65509,
             # bos_token_id=65504,
